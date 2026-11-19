@@ -1,0 +1,482 @@
+<?php
+
+namespace App\Services;
+
+use App\Enums\OrderStatus;
+use App\Enums\PayoutMode;
+use App\Enums\SplitRole;
+use App\Enums\SplitStatus;
+use App\Enums\UserRole;
+use App\Models\Order;
+use App\Models\OrderSplit;
+use App\Models\Payment;
+use App\Models\Training;
+use App\Models\User;
+use App\Payments\GatewayManager;
+use App\Payments\RefundResult;
+use App\Payments\WebhookResult;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+use Throwable;
+
+/**
+ * The whole order lifecycle:
+ *
+ *   pending_payment -> paid -> completed -> confirmed
+ *                        \-> refunded      (before completion)
+ *   pending_payment -> failed
+ *
+ * Money never touches SkillMatch's own account except its commission. Every
+ * step writes a balanced ledger transaction describing where the money is.
+ */
+class OrderService
+{
+    public function __construct(
+        private readonly GatewayManager $gateways,
+        private readonly Ledger $ledger,
+    ) {}
+
+    /**
+     * Work out the price breakdown for a training. Pure calculation, no writes.
+     *
+     * @return array<string, int>
+     */
+    public function quote(Training $training, User $buyer, int $requestedPoints = 0): array
+    {
+        $price = $training->price_sen;
+        $fee = (int) round($price * config('skillmatch.platform_fee_percent') / 100);
+        $freelancerShare = $training->freelancer_id ? $training->freelancer_share_sen : 0;
+        $sellerShare = $price - $fee - $freelancerShare;
+
+        if ($sellerShare < 0) {
+            throw ValidationException::withMessages(['training' => 'Freelancer share is larger than what is left after the platform fee.']);
+        }
+
+        // The SkillPoints discount comes out of SkillMatch's commission, so it
+        // is capped at the fee and the trainer's share is never touched.
+        $senPerPoint = max(1, (int) config('skillmatch.skillpoints.sen_per_point'));
+        $maxPoints = min(intdiv($fee, $senPerPoint), max(0, $buyer->skillpointBalance()));
+        $points = max(0, min($requestedPoints, $maxPoints));
+        $discount = $points * $senPerPoint;
+
+        return [
+            'gross_sen' => $price,
+            'platform_fee_sen' => $fee,
+            'seller_share_sen' => $sellerShare,
+            'freelancer_share_sen' => $freelancerShare,
+            'max_points' => $maxPoints,
+            'points' => $points,
+            'discount_sen' => $discount,
+            'amount_sen' => $price - $discount,
+            'platform_net_sen' => $fee - $discount,
+        ];
+    }
+
+    /** @return array{order: Order, checkout_url: string} */
+    public function create(
+        User $buyer,
+        Training $training,
+        ?User $beneficiary,
+        int $points,
+        string $gatewayName,
+        ?PayoutMode $payoutMode = null,
+    ): array {
+        $this->validateBuyer($buyer, $training, $beneficiary);
+
+        if (! in_array($gatewayName, $this->gateways->available(), true)) {
+            throw ValidationException::withMessages(['gateway' => "Unknown gateway '{$gatewayName}'."]);
+        }
+
+        $modes = $this->gateways->payoutModes($gatewayName);
+        $payoutMode ??= $modes[0];
+        if (! in_array($payoutMode, $modes, true)) {
+            throw ValidationException::withMessages([
+                'payout_mode' => "{$gatewayName} does not support {$payoutMode->value} payouts.",
+            ]);
+        }
+
+        $quote = $this->quote($training, $buyer, $points);
+        if ($points > $quote['max_points']) {
+            throw ValidationException::withMessages([
+                'skillpoints' => "You can use at most {$quote['max_points']} SkillPoints on this training.",
+            ]);
+        }
+
+        [$order, $payment] = DB::transaction(function () use ($buyer, $training, $beneficiary, $gatewayName, $payoutMode, $quote) {
+            $order = Order::create([
+                'reference' => 'SM-'.Str::upper(Str::random(8)),
+                'buyer_id' => $buyer->id,
+                'beneficiary_id' => $beneficiary?->id,
+                'training_id' => $training->id,
+                'status' => OrderStatus::PendingPayment,
+                'payout_mode' => $payoutMode,
+                'gateway' => $gatewayName,
+                'gross_sen' => $quote['gross_sen'],
+                'skillpoints_used' => $quote['points'],
+                'discount_sen' => $quote['discount_sen'],
+                'amount_sen' => $quote['amount_sen'],
+                'platform_fee_sen' => $quote['platform_fee_sen'],
+            ]);
+
+            $seller = $training->seller;
+            $this->addSplit($order, $seller, $seller->role === UserRole::Freelancer ? SplitRole::Freelancer : SplitRole::Provider, $quote['seller_share_sen']);
+            if ($training->freelancer_id) {
+                $this->addSplit($order, $training->freelancer, SplitRole::Freelancer, $quote['freelancer_share_sen']);
+            }
+            $this->addSplit($order, null, SplitRole::Platform, $quote['platform_net_sen']);
+
+            if ($quote['points'] > 0) {
+                $buyer->skillpointTransactions()->create([
+                    'order_id' => $order->id,
+                    'points' => -$quote['points'],
+                    'reason' => "Used on order {$order->reference}",
+                ]);
+            }
+
+            $payment = $order->payments()->create([
+                'gateway' => $gatewayName,
+                'amount_sen' => $quote['amount_sen'],
+                'status' => 'pending',
+            ]);
+
+            return [$order, $payment];
+        });
+
+        // Call the gateway outside the DB transaction: never hold a lock while
+        // waiting on a network call.
+        try {
+            $session = $this->gateways->gateway($gatewayName)->createCheckout(
+                $order,
+                $payment,
+                route('webhooks.handle', ['gateway' => $gatewayName]),
+                route('payment.return', ['payment' => $payment->id]),
+            );
+        } catch (Throwable $e) {
+            Log::error('Gateway checkout failed', ['order' => $order->reference, 'error' => $e->getMessage()]);
+            $this->markPaymentFailed($payment);
+
+            throw ValidationException::withMessages(['gateway' => "Could not start payment with {$gatewayName}: {$e->getMessage()}"]);
+        }
+
+        $payment->update(['gateway_reference' => $session->reference, 'checkout_url' => $session->url]);
+
+        return ['order' => $order->fresh(), 'checkout_url' => $session->url];
+    }
+
+    /** Apply a verified webhook. Safe to call more than once for the same event. */
+    public function applyWebhook(string $gatewayName, WebhookResult $result): string
+    {
+        $payment = Payment::where('gateway', $gatewayName)->where('gateway_reference', $result->reference)->first();
+
+        if (! $payment) {
+            return 'unknown_payment';
+        }
+
+        return match ($result->status) {
+            WebhookResult::PAID => $this->markPaid($payment, $result->amountSen),
+            WebhookResult::FAILED => $this->markPaymentFailed($payment),
+            default => 'pending',
+        };
+    }
+
+    public function markPaid(Payment $payment, ?int $paidAmountSen): string
+    {
+        $outcome = DB::transaction(function () use ($payment, $paidAmountSen) {
+            $payment = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            $order = Order::whereKey($payment->order_id)->lockForUpdate()->firstOrFail();
+
+            if ($payment->status === 'paid') {
+                return 'already_paid';
+            }
+            if ($payment->status !== 'pending') {
+                return "ignored_{$payment->status}";
+            }
+            if ($paidAmountSen !== null && $paidAmountSen !== $payment->amount_sen) {
+                Log::warning('Paid amount does not match', ['payment' => $payment->id, 'expected' => $payment->amount_sen, 'got' => $paidAmountSen]);
+
+                return 'amount_mismatch';
+            }
+
+            $payment->update(['status' => 'paid', 'paid_at' => now()]);
+            $order->update(['status' => OrderStatus::Paid, 'paid_at' => now()]);
+
+            $deferred = $order->payout_mode === PayoutMode::Deferred;
+            $lines = [
+                [Ledger::GATEWAY_CLEARING, $order->amount_sen, 0],
+                [Ledger::SKILLPOINTS_DISCOUNT, $order->discount_sen, 0],
+                [Ledger::PLATFORM_REVENUE, 0, $order->platform_fee_sen],
+            ];
+            foreach ($this->trainerSplits($order) as $split) {
+                $account = $deferred ? $this->ledger->held($split->recipient) : $this->ledger->payable($split->recipient);
+                $lines[] = [$account, 0, $split->amount_sen];
+            }
+            $this->ledger->post('payment', "Payment received for {$order->reference} via {$order->gateway}", $order, $lines);
+
+            if ($deferred) {
+                $order->splits()->update(['status' => SplitStatus::Held]);
+            } else {
+                // Billplz / ToyyibPay style: the gateway split the money at
+                // collection, so every share is already with its owner.
+                $this->settlePlatformShare($order);
+                foreach ($this->trainerSplits($order) as $split) {
+                    $this->recordPayout($split, "split-at-collection:{$payment->gateway_reference}");
+                }
+            }
+
+            return 'paid';
+        });
+
+        return $outcome;
+    }
+
+    public function markPaymentFailed(Payment $payment): string
+    {
+        return DB::transaction(function () use ($payment) {
+            $payment = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            if ($payment->status !== 'pending') {
+                return "ignored_{$payment->status}";
+            }
+
+            $order = $payment->order;
+            $payment->update(['status' => 'failed']);
+            $order->update(['status' => OrderStatus::Failed]);
+            $this->restoreSkillpoints($order, 'payment failed');
+
+            return 'failed';
+        });
+    }
+
+    /** The trainer says the training has been delivered. */
+    public function complete(Order $order, User $by): Order
+    {
+        $isTrainer = $order->isSeller($by) || $order->training->freelancer_id === $by->id;
+        abort_unless($isTrainer, 403, 'Only the trainer can mark this training as completed.');
+        $this->expectStatus($order, OrderStatus::Paid);
+
+        $order->update(['status' => OrderStatus::Completed, 'completed_at' => now()]);
+
+        return $order;
+    }
+
+    /**
+     * The buyer (or the auto-confirm job, $by = null) confirms the training.
+     * In deferred mode this is when the trainers' money is released and paid out.
+     */
+    public function confirm(Order $order, ?User $by): Order
+    {
+        if ($by) {
+            abort_unless($order->buyer_id === $by->id, 403, 'Only the buyer can confirm this training.');
+        }
+        $this->expectStatus($order, OrderStatus::Completed);
+
+        DB::transaction(function () use ($order) {
+            $order->update(['status' => OrderStatus::Confirmed, 'confirmed_at' => now()]);
+
+            if ($order->payout_mode === PayoutMode::Deferred) {
+                foreach ($this->trainerSplits($order) as $split) {
+                    $this->ledger->post('release', "Released {$split->role->value} share of {$order->reference}", $order, [
+                        [$this->ledger->held($split->recipient), $split->amount_sen, 0],
+                        [$this->ledger->payable($split->recipient), 0, $split->amount_sen],
+                    ]);
+                    $split->update(['status' => SplitStatus::Released]);
+                }
+                $this->settlePlatformShare($order);
+            }
+
+            $earned = intdiv($order->amount_sen, 100) * (int) config('skillmatch.skillpoints.earn_per_ringgit');
+            if ($earned > 0) {
+                $order->buyer->skillpointTransactions()->create([
+                    'order_id' => $order->id,
+                    'points' => $earned,
+                    'reason' => "Earned from order {$order->reference}",
+                ]);
+            }
+        });
+
+        $this->payOutReleased($order);
+
+        return $order->fresh();
+    }
+
+    /** Send every released split to its recipient. Safe to retry. */
+    public function payOutReleased(Order $order): void
+    {
+        $provider = $this->gateways->payoutProvider();
+
+        foreach ($order->splits()->where('status', SplitStatus::Released)->whereNotNull('recipient_id')->get() as $split) {
+            $result = $provider->payout($split);
+
+            if (! $result->success) {
+                Log::warning('Payout failed, will retry', ['split' => $split->id, 'message' => $result->message]);
+
+                continue;
+            }
+
+            DB::transaction(fn () => $this->recordPayout($split, $result->reference));
+        }
+    }
+
+    public function refund(Order $order, User $by, string $reason): Order
+    {
+        $isBuyer = $order->buyer_id === $by->id;
+        $isPlatform = $by->role === UserRole::Platform;
+        abort_unless($isBuyer || $isPlatform, 403, 'Only the buyer or SkillMatch can refund this order.');
+
+        $allowed = $isPlatform ? [OrderStatus::Paid, OrderStatus::Completed] : [OrderStatus::Paid];
+        if (! in_array($order->status, $allowed, true)) {
+            throw ValidationException::withMessages([
+                'order' => $isBuyer
+                    ? 'You can only cancel before the trainer marks the training as completed. Contact SkillMatch for a dispute.'
+                    : 'Orders can only be refunded before they are confirmed.',
+            ]);
+        }
+
+        $payment = $order->payments()->where('status', 'paid')->firstOrFail();
+        $result = $this->gateways->gateway($order->gateway)->refund($payment, $payment->amount_sen);
+
+        DB::transaction(function () use ($order, $payment, $result, $reason) {
+            $order->refunds()->create([
+                'payment_id' => $payment->id,
+                'amount_sen' => $payment->amount_sen,
+                'status' => $result->status,
+                'gateway_reference' => $result->reference,
+                'reason' => $reason,
+            ]);
+
+            $platformNet = $order->platform_fee_sen - $order->discount_sen;
+            $lines = [
+                [Ledger::PLATFORM_REVENUE, $order->platform_fee_sen, 0],
+                [Ledger::SKILLPOINTS_DISCOUNT, 0, $order->discount_sen],
+            ];
+
+            if ($order->payout_mode === PayoutMode::Deferred) {
+                // Money was still held at the gateway: just give it back.
+                foreach ($this->trainerSplits($order) as $split) {
+                    $lines[] = [$this->ledger->held($split->recipient), $split->amount_sen, 0];
+                    $split->update(['status' => SplitStatus::Reversed]);
+                }
+                $lines[] = [Ledger::GATEWAY_CLEARING, 0, $order->amount_sen];
+            } else {
+                // The trainers were already paid at collection. SkillMatch
+                // refunds the buyer from its own balance and the trainers owe
+                // their share back. This is the risk of instant split.
+                foreach ($this->trainerSplits($order) as $split) {
+                    $lines[] = [$this->ledger->receivable($split->recipient), $split->amount_sen, 0];
+                    $split->update(['status' => SplitStatus::ClawbackRequired]);
+                }
+                $lines[] = [Ledger::GATEWAY_CLEARING, 0, $order->amount_sen - $platformNet];
+                $lines[] = [Ledger::PLATFORM_BANK, 0, $platformNet];
+            }
+
+            $this->ledger->post('refund', "Refund for {$order->reference}: {$reason}", $order, $lines);
+            $order->splits()->where('role', SplitRole::Platform)->update(['status' => SplitStatus::Reversed]);
+
+            $payment->update(['status' => 'refunded']);
+            $order->update(['status' => OrderStatus::Refunded, 'refunded_at' => now()]);
+            $this->restoreSkillpoints($order, 'refunded');
+        });
+
+        if ($result->status === RefundResult::MANUAL_REQUIRED) {
+            Log::notice('Refund needs manual action at the gateway', ['order' => $order->reference, 'message' => $result->message]);
+        }
+
+        return $order->fresh();
+    }
+
+    public function autoConfirmDue(): int
+    {
+        $due = Order::where('status', OrderStatus::Completed)
+            ->where('completed_at', '<=', now()->subDays(config('skillmatch.auto_confirm_days')))
+            ->get();
+
+        $due->each(fn (Order $order) => $this->confirm($order, null));
+
+        return $due->count();
+    }
+
+    private function validateBuyer(User $buyer, Training $training, ?User $beneficiary): void
+    {
+        if (! $buyer->role->canBuy()) {
+            throw ValidationException::withMessages(['buyer' => 'This account type cannot buy trainings.']);
+        }
+        if (in_array($buyer->id, [$training->seller_id, $training->freelancer_id], true)) {
+            throw ValidationException::withMessages(['training' => 'You cannot buy your own training.']);
+        }
+
+        if ($buyer->role === UserRole::CompanyHr) {
+            if (! $beneficiary || $beneficiary->company_id !== $buyer->id) {
+                throw ValidationException::withMessages(['beneficiary_id' => 'Choose one of your staff for this training.']);
+            }
+        } elseif ($beneficiary) {
+            throw ValidationException::withMessages(['beneficiary_id' => 'Only company HR can buy a training for someone else.']);
+        }
+    }
+
+    private function addSplit(Order $order, ?User $recipient, SplitRole $role, int $amountSen): void
+    {
+        if ($amountSen <= 0) {
+            return;
+        }
+
+        $order->splits()->create([
+            'recipient_id' => $recipient?->id,
+            'role' => $role,
+            'amount_sen' => $amountSen,
+            'status' => SplitStatus::Pending,
+        ]);
+    }
+
+    /** @return \Illuminate\Support\Collection<int, OrderSplit> */
+    private function trainerSplits(Order $order)
+    {
+        return $order->splits()->whereNotNull('recipient_id')->with('recipient')->get();
+    }
+
+    /** SkillMatch's own commission moves from the gateway to SkillMatch's bank. */
+    private function settlePlatformShare(Order $order): void
+    {
+        $split = $order->splits()->where('role', SplitRole::Platform)->first();
+        if (! $split) {
+            return;
+        }
+
+        $this->ledger->post('platform_settlement', "SkillMatch commission settled for {$order->reference}", $order, [
+            [Ledger::PLATFORM_BANK, $split->amount_sen, 0],
+            [Ledger::GATEWAY_CLEARING, 0, $split->amount_sen],
+        ]);
+        $split->update(['status' => SplitStatus::PaidOut, 'paid_out_at' => now()]);
+    }
+
+    private function recordPayout(OrderSplit $split, ?string $reference): void
+    {
+        $split->loadMissing('order', 'recipient');
+
+        $this->ledger->post('payout', "Paid {$split->recipient->name} for {$split->order->reference}", $split->order, [
+            [$this->ledger->payable($split->recipient), $split->amount_sen, 0],
+            [Ledger::GATEWAY_CLEARING, 0, $split->amount_sen],
+        ]);
+        $split->update(['status' => SplitStatus::PaidOut, 'payout_reference' => $reference, 'paid_out_at' => now()]);
+    }
+
+    private function restoreSkillpoints(Order $order, string $why): void
+    {
+        if ($order->skillpoints_used > 0) {
+            $order->buyer->skillpointTransactions()->create([
+                'order_id' => $order->id,
+                'points' => $order->skillpoints_used,
+                'reason' => "Returned from order {$order->reference} ({$why})",
+            ]);
+        }
+    }
+
+    private function expectStatus(Order $order, OrderStatus $status): void
+    {
+        if ($order->status !== $status) {
+            throw ValidationException::withMessages([
+                'order' => "Order is {$order->status->value}, expected {$status->value}.",
+            ]);
+        }
+    }
+}
