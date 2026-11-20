@@ -13,10 +13,17 @@ export default function Orders() {
     }, []);
 
     const relation = (o) => {
-        if (o.buyer?.id === me.id) return 'You bought';
+        if (o.view_as === 'buyer') return 'You bought';
+        if (o.view_as === 'trainer') return 'You sell';
         if (o.beneficiary?.id === me.id) return 'Bought for you';
-        if (o.splits.some((s) => s.recipient?.id === me.id)) return 'You sell';
         return '';
+    };
+
+    // Each person sees only their own figure: the buyer what they paid, the trainer what they receive.
+    const amount = (o) => {
+        if (o.view_as === 'trainer') return { value: rm(o.my_amount_sen), hint: 'you receive' };
+        if (o.amount_sen !== undefined) return { value: rm(o.amount_sen), hint: o.view_as === 'buyer' ? 'you paid' : 'paid' };
+        return { value: '—', hint: '' };
     };
 
     return (
@@ -34,7 +41,7 @@ export default function Orders() {
                                 <th className="py-2 pr-4 font-medium">Training</th>
                                 <th className="py-2 pr-4 font-medium">Buyer</th>
                                 <th className="py-2 pr-4 font-medium">Mode</th>
-                                <th className="py-2 pr-4 text-right font-medium">Paid</th>
+                                <th className="py-2 pr-4 text-right font-medium">Amount</th>
                                 <th className="py-2 pr-4 font-medium">Status</th>
                                 <th className="py-2 font-medium">Created</th>
                             </tr>
@@ -56,7 +63,10 @@ export default function Orders() {
                                     <td className="py-2 pr-4">
                                         {o.payout_mode} · {o.gateway}
                                     </td>
-                                    <td className="py-2 pr-4 text-right tabular-nums">{rm(o.amount_sen)}</td>
+                                    <td className="py-2 pr-4 text-right tabular-nums">
+                                        {amount(o).value}
+                                        <div className="text-xs text-slate-500">{amount(o).hint}</div>
+                                    </td>
                                     <td className="py-2 pr-4">
                                         <Badge status={o.status} />
                                     </td>

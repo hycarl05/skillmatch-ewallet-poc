@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\DemoController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\PlatformController;
+use App\Http\Controllers\Api\StripeConnectController;
 use App\Http\Controllers\Api\TrainingController;
 use App\Http\Controllers\Api\WalletController;
 use App\Http\Controllers\WebhookController;
@@ -27,5 +28,7 @@ Route::middleware(DemoUser::class)->group(function () {
     Route::post('orders/{order}/refund', [OrderController::class, 'refund']);
 
     Route::get('wallet', [WalletController::class, 'show']);
+    Route::get('stripe/connect', [StripeConnectController::class, 'status']);
+    Route::post('stripe/connect', [StripeConnectController::class, 'onboard']);
     Route::get('platform/ledger', [PlatformController::class, 'ledger']);
 });

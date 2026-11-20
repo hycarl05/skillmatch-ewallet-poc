@@ -7,6 +7,7 @@ const GATEWAY_LABEL = {
     fake: 'FakePay simulator (no keys needed)',
     billplz: 'Billplz sandbox',
     chip: 'CHIP sandbox',
+    stripe: 'Stripe test mode (Connect payouts)',
 };
 
 const MODE_HELP = {
@@ -157,16 +158,6 @@ function Checkout({ training, onClose }) {
                     <dd className="text-right">− {rm(quote.discount_sen)}</dd>
                     <dt className="font-medium">You pay</dt>
                     <dd className="text-right font-medium">{rm(quote.amount_sen)}</dd>
-                    <dt className="pt-2 text-slate-500">→ {training.seller.name}</dt>
-                    <dd className="pt-2 text-right">{rm(quote.seller_share_sen)}</dd>
-                    {quote.freelancer_share_sen > 0 && (
-                        <>
-                            <dt className="text-slate-500">→ {training.freelancer.name}</dt>
-                            <dd className="text-right">{rm(quote.freelancer_share_sen)}</dd>
-                        </>
-                    )}
-                    <dt className="text-slate-500">→ SkillMatch ({config.platform_fee_percent}% fee − discount)</dt>
-                    <dd className="text-right">{rm(quote.platform_net_sen)}</dd>
                 </dl>
             )}
 

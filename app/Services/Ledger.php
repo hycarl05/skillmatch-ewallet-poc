@@ -23,8 +23,10 @@ class Ledger
     public const PLATFORM_BANK = 'platform_bank';
     public const PLATFORM_REVENUE = 'platform_revenue';
     public const SKILLPOINTS_DISCOUNT = 'skillpoints_discount';
+    public const GATEWAY_FEES = 'gateway_fees';
 
     private const SYSTEM_ACCOUNTS = [
+        self::GATEWAY_FEES => ['Payment gateway processing fees (paid by SkillMatch)', 'expense'],
         self::GATEWAY_CLEARING => ['Money at payment gateway', 'asset'],
         self::PLATFORM_BANK => ["SkillMatch's own bank (commission settled)", 'asset'],
         self::PLATFORM_REVENUE => ['SkillMatch commission', 'revenue'],

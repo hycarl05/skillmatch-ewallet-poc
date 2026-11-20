@@ -21,6 +21,9 @@ class TrainingController extends Controller
     /** Price breakdown for the current user, including how many SkillPoints they can use. */
     public function quote(Request $request, Training $training, OrderService $orders): JsonResponse
     {
-        return response()->json($orders->quote($training, $request->user(), (int) $request->query('skillpoints', 0)));
+        $quote = $orders->quote($training, $request->user(), (int) $request->query('skillpoints', 0));
+
+        // The buyer only needs what they will pay; how it's split stays internal.
+        return response()->json(collect($quote)->only(['gross_sen', 'max_points', 'points', 'discount_sen', 'amount_sen']));
     }
 }

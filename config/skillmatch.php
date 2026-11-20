@@ -63,6 +63,14 @@ return [
             'secret_key' => env('CHIP_SECRET_KEY'),
             'public_key' => env('CHIP_PUBLIC_KEY'), // PEM, for verifying callback signatures
         ],
+        'stripe' => [
+            'class' => App\Payments\Gateways\StripeGateway::class,
+            'payout_modes' => ['deferred'], // separate charges and transfers: held in SkillMatch's Stripe balance until confirmed
+            'payout_provider' => 'stripe',  // Connect transfers to the trainer's Express account
+            'publishable_key' => env('STRIPE_KEY'),
+            'secret_key' => env('STRIPE_SECRET_KEY'),
+            'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),
+        ],
     ],
 
     // Payout provider used to pay trainers in deferred mode.

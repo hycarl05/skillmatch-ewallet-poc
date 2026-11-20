@@ -36,4 +36,14 @@ export const ROLE_LABEL = {
     platform: 'SkillMatch admin',
 };
 
+export const GATEWAY_LABEL = {
+    fake: 'FakePay',
+    billplz: 'Billplz',
+    chip: 'CHIP',
+    stripe: 'Stripe',
+};
+
+// "4.2%" — share of a total, one decimal, without trailing ".0".
+export const pct = (part, total) => (total ? `${+((part / total) * 100).toFixed(1)}%` : '—');
+
 export const canBuy = (role) => ['individual', 'company_hr', 'provider'].includes(role);

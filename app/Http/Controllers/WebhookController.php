@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Payment;
 use App\Models\WebhookEvent;
 use App\Payments\GatewayManager;
 use App\Payments\InvalidWebhookSignature;
@@ -50,6 +51,12 @@ class WebhookController extends Controller
             });
         } catch (UniqueConstraintViolationException) {
             return response()->json(['result' => 'duplicate']);
+        }
+
+        // Best effort, outside the transaction: if the fee isn't known yet,
+        // viewing the order asks again.
+        if ($outcome === 'paid' && $payment = Payment::where('gateway', $gateway)->where('gateway_reference', $result->reference)->first()) {
+            $orders->recordProcessingFee($payment);
         }
 
         // Always 200 for a verified webhook, so the gateway stops retrying.

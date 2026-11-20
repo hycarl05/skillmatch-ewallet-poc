@@ -14,6 +14,7 @@ use App\Models\Training;
 use App\Models\User;
 use App\Payments\GatewayManager;
 use App\Payments\RefundResult;
+use App\Payments\ReportsProcessingFee;
 use App\Payments\WebhookResult;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -231,6 +232,53 @@ class OrderService
         return $outcome;
     }
 
+    /**
+     * Ask the gateway what it charged for processing and book it as
+     * SkillMatch's expense: trainers get their full share, so the fee comes
+     * out of SkillMatch's commission. Calls the gateway, so never run it
+     * inside a DB transaction. Safe to call repeatedly; does nothing once known.
+     */
+    public function recordProcessingFee(Payment $payment): void
+    {
+        if ($payment->gateway_fee_sen !== null || ! in_array($payment->status, ['paid', 'refunded'], true)) {
+            return;
+        }
+
+        $gateway = $this->gateways->gateway($payment->gateway);
+        if (! $gateway instanceof ReportsProcessingFee) {
+            return;
+        }
+
+        try {
+            $fee = $gateway->processingFee($payment);
+        } catch (Throwable $e) {
+            Log::warning('Could not fetch processing fee', ['payment' => $payment->id, 'error' => $e->getMessage()]);
+
+            return;
+        }
+
+        if ($fee === null) {
+            return;
+        }
+
+        DB::transaction(function () use ($payment, $fee) {
+            $payment = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            if ($payment->gateway_fee_sen !== null) {
+                return;
+            }
+
+            $payment->update(['gateway_fee_sen' => $fee]);
+
+            if ($fee > 0) {
+                $order = $payment->order;
+                $this->ledger->post('gateway_fee', ucfirst($payment->gateway)." processing fee for {$order->reference}, paid from SkillMatch's commission", $order, [
+                    [Ledger::GATEWAY_FEES, $fee, 0],
+                    [Ledger::PLATFORM_BANK, 0, $fee],
+                ]);
+            }
+        });
+    }
+
     public function markPaymentFailed(Payment $payment): string
     {
         return DB::transaction(function () use ($payment) {
@@ -303,7 +351,7 @@ class OrderService
     /** Send every released split to its recipient. Safe to retry. */
     public function payOutReleased(Order $order): void
     {
-        $provider = $this->gateways->payoutProvider();
+        $provider = $this->gateways->payoutProvider($order->gateway);
 
         foreach ($order->splits()->where('status', SplitStatus::Released)->whereNotNull('recipient_id')->get() as $split) {
             $result = $provider->payout($split);

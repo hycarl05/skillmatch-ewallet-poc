@@ -86,6 +86,17 @@ Billplz can't refund FPX automatically, so a refund is recorded as `manual_requi
 
 Payouts to trainers still go through the fake payout provider. Real payouts need a **CHIP Send** account, which CHIP opens for you. With CHIP Collect + Send, the money sits in SkillMatch's CHIP balance until it's paid out, so management must be comfortable with that.
 
+### Stripe (deferred payout with Connect)
+Uses Stripe Checkout plus Connect *separate charges and transfers*: the buyer pays SkillMatch's Stripe account, and each trainer's share is transferred to their **Express** connected account when the training is confirmed.
+
+1. Put your **test** keys in `STRIPE_KEY` and `STRIPE_SECRET_KEY`.
+2. Forward webhooks locally (no tunnel needed): `stripe listen --forward-to localhost:8000/api/webhooks/stripe --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired`, then copy the printed `whsec_…` into `STRIPE_WEBHOOK_SECRET`.
+3. Turn on Connect in the dashboard, and FPX / GrabPay under *Settings → Payment methods* if you want them (Checkout shows whatever is enabled).
+4. As a trainer (Hafiz, Priya, Akademi Digital): *Wallet* → **Set up payouts** → finish Stripe's test onboarding.
+5. Buy a training with *Stripe*, pay with card `4242 4242 4242 4242`, complete and confirm it: the shares go out as Stripe transfers (`tr_…` in the split's payout reference).
+
+As with CHIP, the money sits in SkillMatch's Stripe balance until confirmation. A trainer who hasn't finished onboarding keeps the share in `payable`, and `payOutReleased` retries it later.
+
 ## Where things are
 
 | | |

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useApp } from '../context';
 import { api, rm, when } from '../lib';
-import { Card, Stat } from '../ui';
+import { Button, Card, ErrorNote, Stat } from '../ui';
 
 export default function Wallet() {
     const { me } = useApp();
@@ -33,6 +33,8 @@ export default function Wallet() {
                     <Stat label="Owed back" value={rm(w.earnings.owed_back_sen)} hint="Refunds after you were paid" />
                 </div>
             )}
+
+            {sells && <StripePayouts />}
 
             <div className="grid gap-4 sm:grid-cols-3">
                 <Stat label="SkillPoints" value={w.skillpoints.balance.toLocaleString()} hint="Discount only. Can’t be withdrawn or transferred." />
@@ -68,6 +70,60 @@ export default function Wallet() {
                 </Card>
             </div>
         </div>
+    );
+}
+
+function StripePayouts() {
+    const [status, setStatus] = useState(null);
+    const [error, setError] = useState(null);
+    const [busy, setBusy] = useState(false);
+
+    useEffect(() => {
+        api('/stripe/connect')
+            .then(setStatus)
+            .catch((e) => setError(e.message));
+    }, []);
+
+    const onboard = async () => {
+        setBusy(true);
+        setError(null);
+        try {
+            const { url } = await api('/stripe/connect', { method: 'POST' });
+            window.location.href = url;
+        } catch (e) {
+            setError(e.message);
+            setBusy(false);
+        }
+    };
+
+    const ready = status?.payouts_enabled;
+
+    return (
+        <Card
+            title="Stripe payouts"
+            action={
+                !ready && (
+                    <Button onClick={onboard} disabled={busy || !status}>
+                        {status?.connected ? 'Finish setup' : 'Set up payouts'}
+                    </Button>
+                )
+            }
+        >
+            <ErrorNote error={error} />
+            {!status && !error && <div className="text-sm text-slate-500">Checking…</div>}
+            {status && !status.connected && (
+                <div className="text-sm text-slate-600">
+                    Connect a Stripe account to receive your share of trainings paid with Stripe. Stripe collects your identity and bank details.
+                </div>
+            )}
+            {status?.connected && (
+                <div className="text-sm text-slate-600">
+                    {ready
+                        ? `Payouts are on. Released shares go to Stripe account ${status.account_id}, then to your bank.`
+                        : `Stripe still needs some details before it can pay you (${status.requirements_due.length} item(s) due).`}
+                </div>
+            )}
+        </Card>
     );
 }
 

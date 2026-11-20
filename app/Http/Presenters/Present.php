@@ -48,9 +48,31 @@ class Present
         $isBuyer = $order->buyer_id === $viewer->id;
         $isPlatform = $viewer->role->value === 'platform';
 
+        // Each person only gets the money figures that concern them:
+        //   platform: everything (payment, every share, gateway fee, what SkillMatch keeps)
+        //   buyer:    what they paid
+        //   trainer:  what they receive
+        //   attendee: (staff a company paid for) no money figures at all
+        $viewAs = match (true) {
+            $isPlatform => 'platform',
+            $isBuyer => 'buyer',
+            $isTrainer => 'trainer',
+            default => 'attendee',
+        };
+
+        $split = fn ($s) => [
+            'id' => $s->id,
+            'role' => $s->role->value,
+            'recipient' => self::user($s->recipient),
+            'amount_sen' => $s->amount_sen,
+            'status' => $s->status->value,
+            'payout_reference' => $s->payout_reference,
+        ];
+
         $data = [
             'id' => $order->id,
             'reference' => $order->reference,
+            'view_as' => $viewAs,
             'status' => $order->status->value,
             'payout_mode' => $order->payout_mode->value,
             'gateway' => $order->gateway,
@@ -58,19 +80,6 @@ class Present
             'buyer' => self::user($order->buyer),
             'beneficiary' => self::user($order->beneficiary),
             'seller' => self::user($order->training->seller),
-            'gross_sen' => $order->gross_sen,
-            'skillpoints_used' => $order->skillpoints_used,
-            'discount_sen' => $order->discount_sen,
-            'amount_sen' => $order->amount_sen,
-            'platform_fee_sen' => $order->platform_fee_sen,
-            'splits' => $order->splits->map(fn ($s) => [
-                'id' => $s->id,
-                'role' => $s->role->value,
-                'recipient' => self::user($s->recipient),
-                'amount_sen' => $s->amount_sen,
-                'status' => $s->status->value,
-                'payout_reference' => $s->payout_reference,
-            ])->values(),
             'timestamps' => [
                 'created_at' => $order->created_at,
                 'paid_at' => $order->paid_at,
@@ -85,19 +94,53 @@ class Present
                 'refund' => ($isBuyer && $order->status === OrderStatus::Paid)
                     || ($isPlatform && in_array($order->status, [OrderStatus::Paid, OrderStatus::Completed], true)),
             ],
-            'checkout_url' => $order->status === OrderStatus::PendingPayment ? $order->payments()->latest()->value('checkout_url') : null,
+            'checkout_url' => $isBuyer && $order->status === OrderStatus::PendingPayment ? $order->payments()->latest()->value('checkout_url') : null,
         ];
 
+        if ($viewAs === 'platform' || $viewAs === 'buyer') {
+            $data += [
+                'gross_sen' => $order->gross_sen,
+                'skillpoints_used' => $order->skillpoints_used,
+                'discount_sen' => $order->discount_sen,
+                'amount_sen' => $order->amount_sen,
+            ];
+        }
+
+        if ($viewAs === 'platform') {
+            $data += [
+                'platform_fee_sen' => $order->platform_fee_sen,
+                'platform_fee_percent' => $order->gross_sen > 0 ? round($order->platform_fee_sen * 100 / $order->gross_sen, 2) : 0,
+                // Null until the gateway reports it (FakePay / Billplz / CHIP never do here).
+                'processing_fee_sen' => $order->payments()->whereNotNull('gateway_fee_sen')->exists()
+                    ? (int) $order->payments()->sum('gateway_fee_sen')
+                    : null,
+                'splits' => $order->splits->map($split)->values(),
+            ];
+        }
+
+        if ($viewAs === 'trainer') {
+            // Only their own share(s), never the buyer's payment or other people's cut.
+            $data['my_splits'] = $order->splits->where('recipient_id', $viewer->id)->map($split)->values();
+            $data['my_amount_sen'] = (int) $order->splits->where('recipient_id', $viewer->id)->sum('amount_sen');
+        }
+
         if ($detail) {
-            $data['payments'] = $order->payments()->get(['id', 'gateway', 'gateway_reference', 'amount_sen', 'status', 'paid_at', 'created_at']);
-            $data['refunds'] = $order->refunds()->get(['id', 'amount_sen', 'status', 'gateway_reference', 'reason', 'created_at']);
-            $data['ledger'] = $order->ledgerTransactions()->with('entries.account')->orderBy('id')->get()->map(fn ($t) => [
-                'id' => $t->id,
-                'type' => $t->type,
-                'description' => $t->description,
-                'created_at' => $t->created_at,
-                'entries' => $t->entries->map(fn (LedgerEntry $e) => self::entry($e))->values(),
-            ]);
+            if ($viewAs === 'platform' || $viewAs === 'buyer') {
+                $data['payments'] = $order->payments()->get(['id', 'gateway', 'gateway_reference', 'amount_sen', 'gateway_fee_sen', 'status', 'paid_at', 'created_at'])
+                    ->each(fn ($p) => $viewAs === 'platform' ? null : $p->makeHidden('gateway_fee_sen'));
+                $data['refunds'] = $order->refunds()->get(['id', 'amount_sen', 'status', 'gateway_reference', 'reason', 'created_at']);
+            }
+
+            // The ledger records every party's money, so only SkillMatch sees it.
+            if ($viewAs === 'platform') {
+                $data['ledger'] = $order->ledgerTransactions()->with('entries.account')->orderBy('id')->get()->map(fn ($t) => [
+                    'id' => $t->id,
+                    'type' => $t->type,
+                    'description' => $t->description,
+                    'created_at' => $t->created_at,
+                    'entries' => $t->entries->map(fn (LedgerEntry $e) => self::entry($e))->values(),
+                ]);
+            }
         }
 
         return $data;
