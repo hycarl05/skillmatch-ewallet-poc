@@ -44,7 +44,7 @@ pending_payment ──(gateway webhook: paid)──> paid ──(trainer: mark c
 
 ## Run it locally
 
-Requirements: PHP 8.3+, Composer, Node 22+.
+Requirements: PHP 8.4+, Composer, Node 22+.
 
 ```bash
 git clone https://github.com/hycarl05/skillmatch-ewallet-poc.git
