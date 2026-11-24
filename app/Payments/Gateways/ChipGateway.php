@@ -81,7 +81,7 @@ class ChipGateway implements PaymentGateway
         );
     }
 
-    public function refund(Payment $payment, int $amountSen): RefundResult
+    public function refund(Payment $payment, int $amountSen, string $idempotencyKey, array $metadata = []): RefundResult
     {
         $config = $this->config();
 
@@ -90,7 +90,7 @@ class ChipGateway implements PaymentGateway
             ->post(rtrim($config['base_url'], '/')."/purchases/{$payment->gateway_reference}/refund/", ['amount' => $amountSen]);
 
         if ($response->failed()) {
-            return new RefundResult(RefundResult::MANUAL_REQUIRED, message: 'CHIP refund failed: '.$response->body());
+            return new RefundResult(RefundResult::FAILED, message: 'CHIP refund failed: '.$response->body());
         }
 
         return new RefundResult(RefundResult::SUCCEEDED, $response->json('id'));

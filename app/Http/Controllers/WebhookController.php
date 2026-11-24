@@ -6,7 +6,9 @@ use App\Models\Payment;
 use App\Models\WebhookEvent;
 use App\Payments\GatewayManager;
 use App\Payments\InvalidWebhookSignature;
+use App\Payments\WebhookResult;
 use App\Services\OrderService;
+use App\Services\RefundService;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -20,7 +22,7 @@ use InvalidArgumentException;
  */
 class WebhookController extends Controller
 {
-    public function __invoke(string $gateway, Request $request, GatewayManager $gateways, OrderService $orders): JsonResponse
+    public function __invoke(string $gateway, Request $request, GatewayManager $gateways, OrderService $orders, RefundService $refunds): JsonResponse
     {
         try {
             $result = $gateways->gateway($gateway)->parseWebhook($request);
@@ -37,14 +39,16 @@ class WebhookController extends Controller
         // Recording the event and applying it happen in one DB transaction: if
         // applying fails, the event isn't stored and the gateway's retry works.
         try {
-            $outcome = DB::transaction(function () use ($gateway, $result, $orders) {
+            $outcome = DB::transaction(function () use ($gateway, $result, $orders, $refunds) {
                 $event = WebhookEvent::create([
                     'gateway' => $gateway,
                     'event_key' => $result->eventKey,
                     'payload' => $result->payload,
                 ]);
 
-                $outcome = $orders->applyWebhook($gateway, $result);
+                $outcome = $result->kind === WebhookResult::KIND_PAYMENT
+                    ? $orders->applyWebhook($gateway, $result)
+                    : $refunds->applyWebhook($gateway, $result);
                 $event->update(['result' => $outcome]);
 
                 return $outcome;
@@ -55,7 +59,7 @@ class WebhookController extends Controller
 
         // Best effort, outside the transaction: if the fee isn't known yet,
         // viewing the order asks again.
-        if ($outcome === 'paid' && $payment = Payment::where('gateway', $gateway)->where('gateway_reference', $result->reference)->first()) {
+        if ($result->kind === WebhookResult::KIND_PAYMENT && $outcome === 'paid' && $payment = Payment::where('gateway', $gateway)->where('gateway_reference', $result->reference)->first()) {
             $orders->recordProcessingFee($payment);
         }
 

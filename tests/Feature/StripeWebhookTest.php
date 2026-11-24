@@ -13,6 +13,8 @@ use App\Models\User;
 use App\Payments\GatewayManager;
 use App\Payments\Payouts\StripeConnectPayoutProvider;
 use App\Payments\Gateways\StripeGateway;
+use App\Payments\RefundResult;
+use App\Models\Refund;
 use App\Services\Ledger;
 use App\Services\OrderService;
 use Database\Seeders\DatabaseSeeder;
@@ -176,6 +178,123 @@ class StripeWebhookTest extends TestCase
         $this->assertNotInstanceOf(StripeConnectPayoutProvider::class, app(GatewayManager::class)->payoutProvider('fake'));
     }
 
+    public function test_payment_intent_is_stored_so_disputes_can_be_matched(): void
+    {
+        [, $payment] = $this->stripeOrder();
+        $this->stripeWebhook('evt_pi', 'checkout.session.completed', $payment, 'paid');
+
+        $this->assertSame('pi_test_'.$payment->id, $payment->fresh()->gateway_payment_id);
+    }
+
+    public function test_refund_updated_webhook_marks_a_pending_refund_failed_and_owed_again(): void
+    {
+        $this->fakeStripeFee(null)->shouldReceive('refund')->andReturn(new RefundResult(RefundResult::PENDING, 're_test_1'));
+        [$order, $payment] = $this->stripeOrder();
+        $this->stripeWebhook('evt_paid', 'checkout.session.completed', $payment, 'paid');
+
+        $admin = User::where('role', 'platform')->firstOrFail();
+        $this->withHeader('X-Demo-User', (string) $admin->id)
+            ->postJson("/api/orders/{$order->id}/refunds", ['amount_sen' => 45000, 'reason' => 'FPX cancel'])
+            ->assertJsonPath('refunds.0.status', 'pending');
+
+        $this->stripeObjectWebhook('evt_rf', 'refund.updated', [
+            'id' => 're_test_1', 'object' => 'refund', 'status' => 'failed', 'amount' => 45000, 'failure_reason' => 'expired_or_canceled_card',
+        ])->assertJson(['result' => 'refund_failed']);
+
+        $refund = $order->refunds()->sole();
+        $this->assertSame(Refund::FAILED, $refund->status);
+        $this->assertSame('expired_or_canceled_card', $refund->failure_reason);
+        $this->assertSame(45000, app(Ledger::class)->balance(Ledger::REFUNDS_OWED));
+        $this->assertSame((int) LedgerEntry::sum('debit_sen'), (int) LedgerEntry::sum('credit_sen'));
+    }
+
+    public function test_refund_made_in_the_stripe_dashboard_is_recorded(): void
+    {
+        [$order, $payment] = $this->stripeOrder();
+        $this->stripeWebhook('evt_paid', 'checkout.session.completed', $payment, 'paid');
+
+        $this->stripeObjectWebhook('evt_dash', 'refund.created', [
+            'id' => 're_dash_1', 'object' => 'refund', 'status' => 'succeeded', 'amount' => 45000,
+            'payment_intent' => 'pi_test_'.$payment->id, 'reason' => 'requested_by_customer', 'metadata' => [],
+        ])->assertJson(['result' => 'external_refund_recorded']);
+
+        $refund = $order->refunds()->sole();
+        $this->assertSame('gateway_dashboard', $refund->source);
+        $this->assertSame('Refunded in the Stripe dashboard (requested by customer)', $refund->reason);
+        $this->assertSame(OrderStatus::Refunded, $order->fresh()->status);
+        $this->assertSame((int) LedgerEntry::sum('debit_sen'), (int) LedgerEntry::sum('credit_sen'));
+    }
+
+    public function test_skillmatch_refund_is_tagged_and_its_webhook_not_recorded_twice(): void
+    {
+        $gateway = $this->fakeStripeFee(null);
+        $gateway->shouldReceive('refund')
+            ->withArgs(fn ($payment, $amount, $key, $metadata) => isset($metadata['skillmatch_refund_id']))
+            ->andReturn(new RefundResult(RefundResult::PENDING, 're_own_1'));
+        [$order, $payment] = $this->stripeOrder();
+        $this->stripeWebhook('evt_paid', 'checkout.session.completed', $payment, 'paid');
+
+        $admin = User::where('role', 'platform')->firstOrFail();
+        $this->withHeader('X-Demo-User', (string) $admin->id)
+            ->postJson("/api/orders/{$order->id}/refunds", ['amount_sen' => 45000, 'reason' => 'Cancel'])->assertOk();
+
+        $this->stripeObjectWebhook('evt_own', 'refund.created', [
+            'id' => 're_own_1', 'object' => 'refund', 'status' => 'pending', 'amount' => 45000,
+            'payment_intent' => 'pi_test_'.$payment->id, 'metadata' => ['skillmatch_refund_id' => (string) $order->refunds()->sole()->id],
+        ])->assertJson(['result' => 'pending']);
+
+        $this->assertSame(1, $order->refunds()->count());
+    }
+
+    public function test_open_dispute_pauses_refunds_and_payouts_and_a_win_lifts_it(): void
+    {
+        [$order, $payment] = $this->stripeOrder();
+        $this->stripeWebhook('evt_paid', 'checkout.session.completed', $payment, 'paid');
+
+        $this->dispute('evt_d1', 'charge.dispute.created', $payment, 'needs_response')->assertJson(['result' => 'dispute_open']);
+        $this->assertTrue($order->fresh()->hasOpenDispute());
+
+        $admin = User::where('role', 'platform')->firstOrFail();
+        $this->withHeader('X-Demo-User', (string) $admin->id)
+            ->postJson("/api/orders/{$order->id}/refunds", ['amount_sen' => 100, 'reason' => 'x'])
+            ->assertUnprocessable();
+
+        $this->dispute('evt_d2', 'charge.dispute.closed', $payment, 'won')->assertJson(['result' => 'dispute_won']);
+        $this->assertFalse($order->fresh()->hasOpenDispute());
+        $this->dispute('evt_d3', 'charge.dispute.updated', $payment, 'under_review')->assertJson(['result' => 'ignored_dispute_won']);
+    }
+
+    public function test_lost_dispute_is_booked_as_a_refund_the_card_network_already_made(): void
+    {
+        [$order, $payment] = $this->stripeOrder();
+        $this->stripeWebhook('evt_paid', 'checkout.session.completed', $payment, 'paid');
+
+        $this->dispute('evt_l1', 'charge.dispute.created', $payment, 'needs_response');
+        $this->dispute('evt_l2', 'charge.dispute.closed', $payment, 'lost')->assertJson(['result' => 'dispute_lost']);
+
+        $order->refresh();
+        $refund = $order->refunds()->sole();
+        $this->assertSame('chargeback', $refund->source);
+        $this->assertSame(Refund::SUCCEEDED, $refund->status);
+        $this->assertSame('du_test_'.$payment->id, $refund->gateway_reference);
+        $this->assertSame(OrderStatus::Refunded, $order->status);
+        $this->assertTrue($order->splits->every(fn ($s) => $s->status === SplitStatus::Reversed));
+        $this->assertSame(0, app(Ledger::class)->balance(Ledger::GATEWAY_CLEARING));
+        $this->assertSame((int) LedgerEntry::sum('debit_sen'), (int) LedgerEntry::sum('credit_sen'));
+    }
+
+    private function dispute(string $eventId, string $type, Payment $payment, string $status): TestResponse
+    {
+        return $this->stripeObjectWebhook($eventId, $type, [
+            'id' => 'du_test_'.$payment->id,
+            'object' => 'dispute',
+            'status' => $status,
+            'amount' => $payment->amount_sen,
+            'reason' => 'fraudulent',
+            'payment_intent' => 'pi_test_'.$payment->id,
+        ]);
+    }
+
     /** @return array{Order, Payment} */
     private function stripeOrder(): array
     {
@@ -204,9 +323,25 @@ class StripeWebhookTest extends TestCase
                 'payment_status' => $paymentStatus,
                 'amount_total' => $amount ?? $payment->amount_sen,
                 'currency' => 'myr',
+                'payment_intent' => 'pi_test_'.$payment->id,
             ]],
         ]);
 
+        return $this->signedStripeCall($body, $secret);
+    }
+
+    private function stripeObjectWebhook(string $eventId, string $type, array $object): TestResponse
+    {
+        return $this->signedStripeCall(json_encode([
+            'id' => $eventId,
+            'object' => 'event',
+            'type' => $type,
+            'data' => ['object' => $object],
+        ]), self::SECRET);
+    }
+
+    private function signedStripeCall(string $body, string $secret): TestResponse
+    {
         $timestamp = time();
         $signature = hash_hmac('sha256', "{$timestamp}.{$body}", $secret);
 

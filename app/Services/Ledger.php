@@ -24,6 +24,8 @@ class Ledger
     public const PLATFORM_REVENUE = 'platform_revenue';
     public const SKILLPOINTS_DISCOUNT = 'skillpoints_discount';
     public const GATEWAY_FEES = 'gateway_fees';
+    public const REFUNDS_OWED = 'refunds_owed';
+    public const REFUND_FEES_RECOVERED = 'refund_fees_recovered';
 
     private const SYSTEM_ACCOUNTS = [
         self::GATEWAY_FEES => ['Payment gateway processing fees (paid by SkillMatch)', 'expense'],
@@ -31,6 +33,8 @@ class Ledger
         self::PLATFORM_BANK => ["SkillMatch's own bank (commission settled)", 'asset'],
         self::PLATFORM_REVENUE => ['SkillMatch commission', 'revenue'],
         self::SKILLPOINTS_DISCOUNT => ['SkillPoints discounts given', 'expense'],
+        self::REFUNDS_OWED => ['Refunds owed to buyers, not sent yet', 'liability'],
+        self::REFUND_FEES_RECOVERED => ['Processing fees recovered on refunds (from buyer or trainer)', 'revenue'],
     ];
 
     public function held(User $user): string
@@ -46,6 +50,11 @@ class Ledger
     public function receivable(User $user): string
     {
         return $this->userAccount('receivable', $user, 'Owed back by %s after a refund', 'asset');
+    }
+
+    public function feeDebt(User $user): string
+    {
+        return $this->userAccount('fee_debt', $user, 'Refund fees %s owes SkillMatch', 'asset');
     }
 
     /**

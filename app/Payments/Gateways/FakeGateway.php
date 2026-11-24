@@ -8,6 +8,7 @@ use App\Payments\CheckoutSession;
 use App\Payments\InvalidWebhookSignature;
 use App\Payments\PaymentGateway;
 use App\Payments\RefundResult;
+use App\Payments\ReportsProcessingFee;
 use App\Payments\WebhookResult;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -17,7 +18,7 @@ use Illuminate\Support\Str;
  * payment page, signed webhooks, refunds) so the whole flow can be built and
  * demonstrated without any sandbox account.
  */
-class FakeGateway implements PaymentGateway
+class FakeGateway implements PaymentGateway, ReportsProcessingFee
 {
     public const SIGNATURE_HEADER = 'X-Fake-Signature';
 
@@ -45,6 +46,24 @@ class FakeGateway implements PaymentGateway
 
         $data = json_decode($body, true) ?: [];
 
+        if (($data['type'] ?? 'payment') === 'refund') {
+            return new WebhookResult(
+                reference: (string) ($data['reference'] ?? ''),
+                status: match ($data['status'] ?? null) {
+                    'succeeded' => WebhookResult::SUCCEEDED,
+                    'failed' => WebhookResult::FAILED,
+                    default => WebhookResult::PENDING,
+                },
+                amountSen: isset($data['amount_sen']) ? (int) $data['amount_sen'] : null,
+                eventKey: (string) ($data['event_id'] ?? ''),
+                payload: $data,
+                kind: WebhookResult::KIND_REFUND,
+                gatewayPaymentId: $data['payment_reference'] ?? null,
+                message: $data['failure_reason'] ?? null,
+                ownReference: $data['skillmatch_refund_id'] ?? null,
+            );
+        }
+
         return new WebhookResult(
             reference: (string) ($data['reference'] ?? ''),
             status: match ($data['status'] ?? null) {
@@ -58,9 +77,18 @@ class FakeGateway implements PaymentGateway
         );
     }
 
-    public function refund(Payment $payment, int $amountSen): RefundResult
+    public function refund(Payment $payment, int $amountSen, string $idempotencyKey, array $metadata = []): RefundResult
     {
         return new RefundResult(RefundResult::SUCCEEDED, 'fake_refund_'.Str::lower(Str::random(10)));
+    }
+
+    /** A made-up fee (FAKE_GATEWAY_FEE_PERCENT + FAKE_GATEWAY_FEE_FIXED_SEN), so fee rules can be tried locally. */
+    public function processingFee(Payment $payment): ?int
+    {
+        $percent = (float) config('skillmatch.gateways.fake.fee_percent');
+        $fixed = (int) config('skillmatch.gateways.fake.fee_fixed_sen');
+
+        return min($payment->amount_sen, (int) round($payment->amount_sen * $percent / 100) + $fixed);
     }
 
     /** Build the webhook request this "gateway" would send for a payment. */

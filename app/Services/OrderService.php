@@ -10,10 +10,11 @@ use App\Enums\UserRole;
 use App\Models\Order;
 use App\Models\OrderSplit;
 use App\Models\Payment;
+use App\Models\Refund;
 use App\Models\Training;
 use App\Models\User;
 use App\Payments\GatewayManager;
-use App\Payments\RefundResult;
+use App\Payments\PayoutResult;
 use App\Payments\ReportsProcessingFee;
 use App\Payments\WebhookResult;
 use Illuminate\Support\Facades\DB;
@@ -26,7 +27,7 @@ use Throwable;
  * The whole order lifecycle:
  *
  *   pending_payment -> paid -> completed -> confirmed
- *                        \-> refunded      (before completion)
+ *                        \-------\------------\-> refunded  (see RefundService)
  *   pending_payment -> failed
  *
  * Money never touches SkillMatch's own account except its commission. Every
@@ -176,15 +177,15 @@ class OrderService
         }
 
         return match ($result->status) {
-            WebhookResult::PAID => $this->markPaid($payment, $result->amountSen),
+            WebhookResult::PAID => $this->markPaid($payment, $result->amountSen, $result->gatewayPaymentId),
             WebhookResult::FAILED => $this->markPaymentFailed($payment),
             default => 'pending',
         };
     }
 
-    public function markPaid(Payment $payment, ?int $paidAmountSen): string
+    public function markPaid(Payment $payment, ?int $paidAmountSen, ?string $gatewayPaymentId = null): string
     {
-        $outcome = DB::transaction(function () use ($payment, $paidAmountSen) {
+        $outcome = DB::transaction(function () use ($payment, $paidAmountSen, $gatewayPaymentId) {
             $payment = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
             $order = Order::whereKey($payment->order_id)->lockForUpdate()->firstOrFail();
 
@@ -200,7 +201,7 @@ class OrderService
                 return 'amount_mismatch';
             }
 
-            $payment->update(['status' => 'paid', 'paid_at' => now()]);
+            $payment->update(['status' => 'paid', 'paid_at' => now(), 'gateway_payment_id' => $gatewayPaymentId ?? $payment->gateway_payment_id]);
             $order->update(['status' => OrderStatus::Paid, 'paid_at' => now()]);
 
             $deferred = $order->payout_mode === PayoutMode::Deferred;
@@ -323,10 +324,11 @@ class OrderService
             $order->update(['status' => OrderStatus::Confirmed, 'confirmed_at' => now()]);
 
             if ($order->payout_mode === PayoutMode::Deferred) {
-                foreach ($this->trainerSplits($order) as $split) {
+                // Only what's left after any refund is released.
+                foreach ($this->trainerSplits($order)->where('status', SplitStatus::Held) as $split) {
                     $this->ledger->post('release', "Released {$split->role->value} share of {$order->reference}", $order, [
-                        [$this->ledger->held($split->recipient), $split->amount_sen, 0],
-                        [$this->ledger->payable($split->recipient), 0, $split->amount_sen],
+                        [$this->ledger->held($split->recipient), $split->remainingSen(), 0],
+                        [$this->ledger->payable($split->recipient), 0, $split->remainingSen()],
                     ]);
                     $split->update(['status' => SplitStatus::Released]);
                 }
@@ -348,13 +350,23 @@ class OrderService
         return $order->fresh();
     }
 
-    /** Send every released split to its recipient. Safe to retry. */
+    /** Send every released split to its recipient. Safe to retry. Paused while the payment is disputed. */
     public function payOutReleased(Order $order): void
     {
+        if ($order->hasOpenDispute()) {
+            Log::notice('Payouts paused: payment is disputed', ['order' => $order->reference]);
+
+            return;
+        }
+
         $provider = $this->gateways->payoutProvider($order->gateway);
 
-        foreach ($order->splits()->where('status', SplitStatus::Released)->whereNotNull('recipient_id')->get() as $split) {
-            $result = $provider->payout($split);
+        foreach ($order->splits()->where('status', SplitStatus::Released)->whereNotNull('recipient_id')->with('recipient')->get() as $split) {
+            // Refund fees this trainer owes SkillMatch are kept back from the payout.
+            $offset = min(max(0, $this->ledger->balance($this->ledger->feeDebt($split->recipient))), $split->remainingSen());
+            $amount = $split->remainingSen() - $offset;
+
+            $result = $amount > 0 ? $provider->payout($split, $amount) : new PayoutResult(true, 'kept-for-refund-fees');
 
             if (! $result->success) {
                 Log::warning('Payout failed, will retry', ['split' => $split->id, 'message' => $result->message]);
@@ -362,81 +374,17 @@ class OrderService
                 continue;
             }
 
-            DB::transaction(fn () => $this->recordPayout($split, $result->reference));
+            DB::transaction(fn () => $this->recordPayout($split, $result->reference, $offset));
         }
-    }
-
-    public function refund(Order $order, User $by, string $reason): Order
-    {
-        $isBuyer = $order->buyer_id === $by->id;
-        $isPlatform = $by->role === UserRole::Platform;
-        abort_unless($isBuyer || $isPlatform, 403, 'Only the buyer or SkillMatch can refund this order.');
-
-        $allowed = $isPlatform ? [OrderStatus::Paid, OrderStatus::Completed] : [OrderStatus::Paid];
-        if (! in_array($order->status, $allowed, true)) {
-            throw ValidationException::withMessages([
-                'order' => $isBuyer
-                    ? 'You can only cancel before the trainer marks the training as completed. Contact SkillMatch for a dispute.'
-                    : 'Orders can only be refunded before they are confirmed.',
-            ]);
-        }
-
-        $payment = $order->payments()->where('status', 'paid')->firstOrFail();
-        $result = $this->gateways->gateway($order->gateway)->refund($payment, $payment->amount_sen);
-
-        DB::transaction(function () use ($order, $payment, $result, $reason) {
-            $order->refunds()->create([
-                'payment_id' => $payment->id,
-                'amount_sen' => $payment->amount_sen,
-                'status' => $result->status,
-                'gateway_reference' => $result->reference,
-                'reason' => $reason,
-            ]);
-
-            $platformNet = $order->platform_fee_sen - $order->discount_sen;
-            $lines = [
-                [Ledger::PLATFORM_REVENUE, $order->platform_fee_sen, 0],
-                [Ledger::SKILLPOINTS_DISCOUNT, 0, $order->discount_sen],
-            ];
-
-            if ($order->payout_mode === PayoutMode::Deferred) {
-                // Money was still held at the gateway: just give it back.
-                foreach ($this->trainerSplits($order) as $split) {
-                    $lines[] = [$this->ledger->held($split->recipient), $split->amount_sen, 0];
-                    $split->update(['status' => SplitStatus::Reversed]);
-                }
-                $lines[] = [Ledger::GATEWAY_CLEARING, 0, $order->amount_sen];
-            } else {
-                // The trainers were already paid at collection. SkillMatch
-                // refunds the buyer from its own balance and the trainers owe
-                // their share back. This is the risk of instant split.
-                foreach ($this->trainerSplits($order) as $split) {
-                    $lines[] = [$this->ledger->receivable($split->recipient), $split->amount_sen, 0];
-                    $split->update(['status' => SplitStatus::ClawbackRequired]);
-                }
-                $lines[] = [Ledger::GATEWAY_CLEARING, 0, $order->amount_sen - $platformNet];
-                $lines[] = [Ledger::PLATFORM_BANK, 0, $platformNet];
-            }
-
-            $this->ledger->post('refund', "Refund for {$order->reference}: {$reason}", $order, $lines);
-            $order->splits()->where('role', SplitRole::Platform)->update(['status' => SplitStatus::Reversed]);
-
-            $payment->update(['status' => 'refunded']);
-            $order->update(['status' => OrderStatus::Refunded, 'refunded_at' => now()]);
-            $this->restoreSkillpoints($order, 'refunded');
-        });
-
-        if ($result->status === RefundResult::MANUAL_REQUIRED) {
-            Log::notice('Refund needs manual action at the gateway', ['order' => $order->reference, 'message' => $result->message]);
-        }
-
-        return $order->fresh();
     }
 
     public function autoConfirmDue(): int
     {
+        // An open refund request or dispute waits for SkillMatch to decide first.
         $due = Order::where('status', OrderStatus::Completed)
             ->where('completed_at', '<=', now()->subDays(config('skillmatch.auto_confirm_days')))
+            ->whereDoesntHave('refunds', fn ($q) => $q->where('status', Refund::REQUESTED))
+            ->whereDoesntHave('payments', fn ($q) => $q->where('dispute_status', 'open'))
             ->get();
 
         $due->each(fn (Order $order) => $this->confirm($order, null));
@@ -486,29 +434,37 @@ class OrderService
     private function settlePlatformShare(Order $order): void
     {
         $split = $order->splits()->where('role', SplitRole::Platform)->first();
-        if (! $split) {
+        if (! $split || $split->status === SplitStatus::Reversed) {
             return;
         }
 
         $this->ledger->post('platform_settlement', "SkillMatch commission settled for {$order->reference}", $order, [
-            [Ledger::PLATFORM_BANK, $split->amount_sen, 0],
-            [Ledger::GATEWAY_CLEARING, 0, $split->amount_sen],
+            [Ledger::PLATFORM_BANK, $split->remainingSen(), 0],
+            [Ledger::GATEWAY_CLEARING, 0, $split->remainingSen()],
         ]);
         $split->update(['status' => SplitStatus::PaidOut, 'paid_out_at' => now()]);
     }
 
-    private function recordPayout(OrderSplit $split, ?string $reference): void
+    /** $offset: kept back to settle refund fees the recipient owed; it goes to SkillMatch's bank. */
+    private function recordPayout(OrderSplit $split, ?string $reference, int $offset = 0): void
     {
         $split->loadMissing('order', 'recipient');
 
-        $this->ledger->post('payout', "Paid {$split->recipient->name} for {$split->order->reference}", $split->order, [
-            [$this->ledger->payable($split->recipient), $split->amount_sen, 0],
-            [Ledger::GATEWAY_CLEARING, 0, $split->amount_sen],
+        $description = "Paid {$split->recipient->name} for {$split->order->reference}";
+        if ($offset > 0) {
+            $description .= ', keeping RM '.number_format($offset / 100, 2).' for refund fees they owed';
+        }
+
+        $this->ledger->post('payout', $description, $split->order, [
+            [$this->ledger->payable($split->recipient), $split->remainingSen(), 0],
+            [Ledger::PLATFORM_BANK, $offset, 0],
+            [Ledger::GATEWAY_CLEARING, 0, $split->remainingSen()],
+            [$this->ledger->feeDebt($split->recipient), 0, $offset],
         ]);
-        $split->update(['status' => SplitStatus::PaidOut, 'payout_reference' => $reference, 'paid_out_at' => now()]);
+        $split->update(['status' => SplitStatus::PaidOut, 'payout_reference' => $reference, 'payout_offset_sen' => $offset, 'paid_out_at' => now()]);
     }
 
-    private function restoreSkillpoints(Order $order, string $why): void
+    public function restoreSkillpoints(Order $order, string $why): void
     {
         if ($order->skillpoints_used > 0) {
             $order->buyer->skillpointTransactions()->create([

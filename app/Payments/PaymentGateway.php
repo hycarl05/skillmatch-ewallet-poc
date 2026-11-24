@@ -25,5 +25,12 @@ interface PaymentGateway
      */
     public function parseWebhook(Request $request): WebhookResult;
 
-    public function refund(Payment $payment, int $amountSen): RefundResult;
+    /**
+     * Refund part or all of a payment. The key is unique per attempt, so a
+     * retried network call never refunds twice. Gateways that support it store
+     * the metadata on the refund, so its webhooks can be matched back to us.
+     *
+     * @param  array<string, string>  $metadata
+     */
+    public function refund(Payment $payment, int $amountSen, string $idempotencyKey, array $metadata = []): RefundResult;
 }

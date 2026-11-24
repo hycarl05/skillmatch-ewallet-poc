@@ -1,6 +1,60 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, rm, when } from '../lib';
-import { Card, ErrorNote } from '../ui';
+import { Badge, Card, ErrorNote } from '../ui';
+
+const TODO = {
+    requested: 'Decide',
+    failed: 'Gateway refund failed: retry',
+    manual_required: 'Send it in the gateway dashboard',
+    pending: 'Take the trainer’s share back',
+    succeeded: 'Take the trainer’s share back',
+};
+
+/** Refunds that need SkillMatch: requests to decide, refunds that didn't go out, money owed back. */
+function RefundQueue() {
+    const [refunds, setRefunds] = useState(null);
+
+    useEffect(() => {
+        api('/platform/refunds').then(setRefunds).catch(() => setRefunds([]));
+    }, []);
+
+    if (!refunds) return null;
+
+    return (
+        <Card title={`Refunds to handle (${refunds.length})`}>
+            {refunds.length === 0 ? (
+                <div className="text-sm text-slate-500">Nothing waiting.</div>
+            ) : (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                        <tbody className="divide-y divide-slate-100">
+                            {refunds.map((r) => (
+                                <tr key={r.id}>
+                                    <td className="py-2 pr-4">
+                                        <Link to={`/orders/${r.order.id}`} className="font-medium text-indigo-700 hover:underline">
+                                            {r.order.reference}
+                                        </Link>
+                                        <div className="text-xs text-slate-500">
+                                            {r.order.buyer} · {r.order.training}
+                                        </div>
+                                    </td>
+                                    <td className="py-2 pr-4 text-slate-600">{r.reason}</td>
+                                    <td className="py-2 pr-4 text-right tabular-nums">{rm(r.amount_sen)}</td>
+                                    <td className="py-2 pr-4">
+                                        <Badge status={r.status} />
+                                        <div className="mt-0.5 text-xs text-slate-500">{TODO[r.status]}</div>
+                                    </td>
+                                    <td className="py-2 text-right text-slate-500">{when(r.created_at)}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </Card>
+    );
+}
 
 export default function Platform() {
     const [data, setData] = useState(null);
@@ -23,6 +77,8 @@ export default function Platform() {
                     “Money at payment gateway” is money the gateway is holding. SkillMatch’s own bank only ever receives its commission.
                 </div>
             </div>
+
+            <RefundQueue />
 
             <Card title="Trial balance">
                 <div className="overflow-x-auto">

@@ -6,19 +6,20 @@ use App\Models\OrderSplit;
 use App\Models\Payment;
 use App\Payments\PayoutProvider;
 use App\Payments\PayoutResult;
+use App\Payments\ReversesPayouts;
 use Stripe\Exception\ApiErrorException;
 use Stripe\StripeClient;
 
 /**
  * Moves a released split from SkillMatch's Stripe balance to the trainer's
  * Connect account. Stripe then pays it to their bank on the account's payout
- * schedule.
+ * schedule. After a refund, a transfer reversal pulls the trainer's part back.
  */
-class StripeConnectPayoutProvider implements PayoutProvider
+class StripeConnectPayoutProvider implements PayoutProvider, ReversesPayouts
 {
     public function __construct(private readonly StripeClient $stripe) {}
 
-    public function payout(OrderSplit $split): PayoutResult
+    public function payout(OrderSplit $split, int $amountSen): PayoutResult
     {
         $split->loadMissing('order', 'recipient');
         $accountId = $split->recipient?->stripe_account_id;
@@ -28,7 +29,8 @@ class StripeConnectPayoutProvider implements PayoutProvider
         }
 
         $params = [
-            'amount' => $split->amount_sen,
+            // What's left after refunds, minus any refund fees the trainer owes.
+            'amount' => $amountSen,
             'currency' => 'myr',
             'destination' => $accountId,
             'transfer_group' => $split->order->reference,
@@ -50,6 +52,31 @@ class StripeConnectPayoutProvider implements PayoutProvider
         }
 
         return new PayoutResult(true, $transfer->id);
+    }
+
+    /**
+     * Fails when the trainer's Connect balance is too low (Stripe already paid
+     * it to their bank). The share then stays "owed back" for SkillMatch to
+     * collect another way.
+     */
+    public function reversePayout(OrderSplit $split, int $amountSen, string $idempotencyKey): PayoutResult
+    {
+        $split->loadMissing('order');
+
+        if (! str_starts_with((string) $split->payout_reference, 'tr_')) {
+            return new PayoutResult(false, message: 'This share was not paid by a Stripe transfer');
+        }
+
+        try {
+            $reversal = $this->stripe->transfers->createReversal($split->payout_reference, [
+                'amount' => $amountSen,
+                'metadata' => ['order_reference' => $split->order->reference, 'split_id' => (string) $split->id],
+            ], ['idempotency_key' => $idempotencyKey]);
+        } catch (ApiErrorException $e) {
+            return new PayoutResult(false, message: 'Stripe transfer reversal failed: '.$e->getMessage());
+        }
+
+        return new PayoutResult(true, $reversal->id);
     }
 
     private function chargeFor(OrderSplit $split): ?string

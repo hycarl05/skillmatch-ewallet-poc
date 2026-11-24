@@ -70,7 +70,7 @@ class BillplzGateway implements PaymentGateway
         );
     }
 
-    public function refund(Payment $payment, int $amountSen): RefundResult
+    public function refund(Payment $payment, int $amountSen, string $idempotencyKey, array $metadata = []): RefundResult
     {
         // FPX payments are not reversed automatically. Billplz refunds are done
         // by sending the money back with a Payment Order (or in the dashboard).

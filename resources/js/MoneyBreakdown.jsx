@@ -5,6 +5,10 @@ import { Badge } from './ui';
 const TRAINER_COLORS = ['bg-indigo-500', 'bg-indigo-300'];
 const FEE_COLOR = 'bg-amber-400';
 const PLATFORM_COLOR = 'bg-emerald-500';
+const REFUND_COLOR = 'bg-slate-300';
+
+// A share after refunds.
+const remaining = (s) => s.amount_sen - (s.refunded_sen ?? 0);
 
 const SHARE_STATUS_HELP = {
     pending: 'Waiting for the buyer to pay.',
@@ -26,13 +30,18 @@ export default function AdminBreakdown({ order }) {
     const fee = order.processing_fee_sen; // null = not known (yet)
     const feeKnown = fee !== null;
     const refunded = order.status === 'refunded';
+    const refundedTotal = order.refunded_sen ?? 0;
     const notPaidYet = ['pending_payment', 'failed'].includes(order.status);
 
+    // Refunds are shared pro rata, so SkillMatch gives back part of its commission too.
     const commissionAfterDiscount = order.platform_fee_sen - order.discount_sen;
-    const keeps = refunded ? -(fee ?? 0) : commissionAfterDiscount - (fee ?? 0);
+    const commissionRefunded = platformSplit?.refunded_sen ?? 0;
+    const feesRecovered = order.refund_fees_recovered_sen ?? 0; // refund fees the buyer or trainer paid
+    const keeps = commissionAfterDiscount - commissionRefunded - (fee ?? 0) + feesRecovered;
 
     const segments = [
-        ...trainers.map((s, i) => ({ key: s.id, label: s.recipient.name, amount: s.amount_sen, color: TRAINER_COLORS[i % 2] })),
+        ...trainers.map((s, i) => ({ key: s.id, label: s.recipient.name, amount: remaining(s), color: TRAINER_COLORS[i % 2] })),
+        ...(refundedTotal > 0 ? [{ key: 'refund', label: 'Refunded to buyer', amount: refundedTotal, color: REFUND_COLOR }] : []),
         ...(feeKnown && fee > 0 ? [{ key: 'fee', label: `${gateway} fee`, amount: fee, color: FEE_COLOR }] : []),
         { key: 'platform', label: 'SkillMatch keeps', amount: Math.max(keeps, 0), color: PLATFORM_COLOR },
     ];
@@ -50,7 +59,7 @@ export default function AdminBreakdown({ order }) {
                 <Figure
                     label="SkillMatch keeps"
                     value={`${keeps < 0 ? '−' : ''}${rm(Math.abs(keeps))}`}
-                    hint={refunded ? 'after refund' : `${pct(keeps, order.gross_sen)} of the price`}
+                    hint={refundedTotal > 0 ? 'after refunds' : `${pct(keeps, order.gross_sen)} of the price`}
                     tone={keeps < 0 ? 'text-rose-700' : 'text-emerald-700'}
                 />
             </div>
@@ -83,15 +92,27 @@ export default function AdminBreakdown({ order }) {
                                 <span className="font-medium">{s.recipient.name}</span>
                                 <div className="ml-5 text-xs text-slate-500">
                                     {ROLE_LABEL[s.recipient.role] ?? s.role} · {pct(s.amount_sen, order.gross_sen)} of the price
+                                    {s.refunded_sen > 0 && <span> · {rm(s.refunded_sen)} refunded</span>}
                                     {s.payout_reference && <span className="break-all font-mono"> · {s.payout_reference}</span>}
                                 </div>
                             </td>
-                            <td className="py-2.5 text-right tabular-nums">{rm(s.amount_sen)}</td>
+                            <td className="py-2.5 text-right tabular-nums">{rm(remaining(s))}</td>
                             <td className="w-28 py-2.5 pl-4 text-right">
                                 <Badge status={s.status} />
                             </td>
                         </tr>
                     ))}
+                    {refundedTotal > 0 && (
+                        <tr>
+                            <td className="py-2.5">
+                                <Swatch color={REFUND_COLOR} />
+                                <span className="font-medium">Refunded to buyer</span>
+                                <div className="ml-5 text-xs text-slate-500">Taken from every share in proportion to its size</div>
+                            </td>
+                            <td className="py-2.5 text-right tabular-nums">{rm(refundedTotal)}</td>
+                            <td className="w-28 py-2.5 pl-4" />
+                        </tr>
+                    )}
                     <tr>
                         <td className="py-2.5">
                             <Swatch color={FEE_COLOR} />
@@ -144,10 +165,16 @@ export default function AdminBreakdown({ order }) {
                     )}
                     <dt className="text-slate-600">− {gateway} processing fee</dt>
                     <dd className="text-right">{feeKnown ? `− ${rm(fee)}` : '—'}</dd>
-                    {refunded && (
+                    {commissionRefunded > 0 && (
                         <>
-                            <dt className="text-slate-600">− Commission reversed (refund)</dt>
-                            <dd className="text-right">− {rm(commissionAfterDiscount)}</dd>
+                            <dt className="text-slate-600">− Commission given back in refunds</dt>
+                            <dd className="text-right">− {rm(commissionRefunded)}</dd>
+                        </>
+                    )}
+                    {feesRecovered > 0 && (
+                        <>
+                            <dt className="text-slate-600">+ Processing fee recovered on refunds (buyer / trainer paid)</dt>
+                            <dd className="text-right">+ {rm(feesRecovered)}</dd>
                         </>
                     )}
                     <dt className="border-t border-slate-200 pt-1 font-medium">= SkillMatch keeps</dt>
@@ -157,9 +184,13 @@ export default function AdminBreakdown({ order }) {
                     </dd>
                 </dl>
                 <p className="mt-3 text-xs text-slate-500">
-                    {refunded
+                    {refunded && feesRecovered > 0
+                        ? `${gateway} keeps its processing fee on a refund. The buyer or trainer paid ${rm(feesRecovered)} of it, so SkillMatch only bears the rest.`
+                        : refunded
                         ? `The buyer got the full amount back, but ${gateway} keeps its processing fee, so the refund costs SkillMatch that fee.`
-                        : `Trainers always receive their full share. The discount and the ${gateway} fee both come out of SkillMatch’s commission.`}
+                        : refundedTotal > 0
+                          ? `Part of the payment was refunded. Each share gave back the same proportion; the discount and the ${gateway} fee still come out of SkillMatch’s commission.`
+                          : `Trainers always receive their full share. The discount and the ${gateway} fee both come out of SkillMatch’s commission.`}
                 </p>
             </div>
         </div>
@@ -177,6 +208,9 @@ export function BuyerPayment({ order }) {
                 <div className="text-sm text-slate-500">{notPaidYet ? 'You will pay' : 'You paid'}</div>
                 <div className="text-2xl font-semibold tabular-nums">{rm(order.amount_sen)}</div>
                 {refunded && <div className="mt-1 text-sm text-slate-600">Refunded in full.</div>}
+                {!refunded && order.refunded_sen > 0 && (
+                    <div className="mt-1 text-sm text-slate-600">{rm(order.refunded_sen)} refunded so far.</div>
+                )}
             </div>
             <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 border-t border-slate-100 pt-3 text-sm tabular-nums">
                 <dt className="text-slate-500">Training price</dt>
@@ -210,6 +244,14 @@ export function TrainerEarnings({ order }) {
                 <Badge status={status} />
             </div>
             <p className="text-sm text-slate-600">{SHARE_STATUS_HELP[status]}</p>
+            {splits.some((s) => s.payout_offset_sen > 0) && (
+                <p className="text-sm text-slate-600">
+                    {rm(splits.reduce((t, s) => t + s.payout_offset_sen, 0))} was kept from this payout for refund processing fees you owed.
+                </p>
+            )}
+            {order.my_refunded_sen > 0 && status !== 'reversed' && (
+                <p className="text-sm text-slate-600">{rm(order.my_refunded_sen)} of your share went back to the buyer in a partial refund.</p>
+            )}
             {status === 'released' && order.gateway === 'stripe' && (
                 <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-200">
                     If you haven’t finished setting up {gateway} payouts, do it in your Wallet. Payment is sent once it’s done.

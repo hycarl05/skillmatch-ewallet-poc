@@ -138,48 +138,6 @@ class PaymentFlowTest extends TestCase
         $this->assertSame(5000, $aisyah->fresh()->skillpointBalance());
     }
 
-    public function test_refund_before_completion_in_deferred_mode_reverses_held_money(): void
-    {
-        $aisyah = $this->user('Aisyah');
-        $order = $this->buy($aisyah, 'Laravel for Beginners', points: 1000, mode: 'deferred');
-        $this->webhook($order, 'paid');
-
-        $this->as($aisyah)->postJson("/api/orders/{$order->id}/refund", ['reason' => 'Changed my mind'])
-            ->assertOk()->assertJsonPath('status', 'refunded');
-        $order->refresh();
-
-        $this->assertSplitStatuses($order, SplitStatus::Reversed);
-        $this->assertSame(0, app(Ledger::class)->balance(Ledger::GATEWAY_CLEARING));
-        $this->assertSame(5000, $aisyah->fresh()->skillpointBalance());
-        $this->assertBooksBalance();
-    }
-
-    public function test_refund_after_instant_split_leaves_trainer_owing_their_share(): void
-    {
-        $aisyah = $this->user('Aisyah');
-        $hafiz = $this->user('Hafiz');
-        $order = $this->buy($aisyah, 'Laravel for Beginners', mode: 'instant');
-        $this->webhook($order, 'paid');
-
-        $this->as($aisyah)->postJson("/api/orders/{$order->id}/refund")->assertOk();
-        $order->refresh();
-
-        $this->assertSame(SplitStatus::ClawbackRequired, $order->splits()->where('recipient_id', $hafiz->id)->first()->status);
-        $this->assertSame(40500, app(Ledger::class)->balance("receivable:{$hafiz->id}"));
-        $this->assertBooksBalance();
-    }
-
-    public function test_buyer_cannot_refund_after_training_is_completed(): void
-    {
-        $aisyah = $this->user('Aisyah');
-        $order = $this->buy($aisyah, 'Laravel for Beginners', mode: 'deferred');
-        $this->webhook($order, 'paid');
-        $this->as($this->user('Hafiz'))->postJson("/api/orders/{$order->id}/complete")->assertOk();
-
-        $this->as($aisyah)->postJson("/api/orders/{$order->id}/refund")->assertUnprocessable();
-        $this->as($this->user('SkillMatch Admin'))->postJson("/api/orders/{$order->id}/refund")->assertOk();
-    }
-
     public function test_company_hr_pays_for_their_own_staff_only(): void
     {
         $hr = $this->user('Nadia');

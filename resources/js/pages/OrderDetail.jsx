@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import AdminBreakdown, { BuyerPayment, TrainerEarnings } from '../MoneyBreakdown';
 import { GATEWAY_LABEL, api, rm, when } from '../lib';
+import { RefundForm, RefundList } from '../Refunds';
 import { Badge, Button, Card, ErrorNote } from '../ui';
 
 function Fact({ label, value, hint }) {
@@ -29,6 +30,7 @@ export default function OrderDetail() {
     const [order, setOrder] = useState(null);
     const [error, setError] = useState(null);
     const [busy, setBusy] = useState(false);
+    const [refunding, setRefunding] = useState(false);
 
     const load = useCallback(() => api(`/orders/${id}`).then(setOrder).catch((e) => setError(e.message)), [id]);
 
@@ -43,17 +45,21 @@ export default function OrderDetail() {
         return () => clearInterval(timer);
     }, [order?.status]);
 
-    const act = async (action, body) => {
+    // Every action returns the updated order.
+    const post = async (path, body) => {
         setBusy(true);
         setError(null);
         try {
-            setOrder(await api(`/orders/${id}/${action}`, { method: 'POST', body }));
+            setOrder(await api(path, { method: 'POST', body }));
+            return true;
         } catch (e) {
             setError(e.message);
+            return false;
         } finally {
             setBusy(false);
         }
     };
+    const act = (action, body) => post(`/orders/${id}/${action}`, body);
 
     if (!order) return error ? <ErrorNote error={error} /> : <div className="text-slate-500">Loading…</div>;
 
@@ -62,8 +68,10 @@ export default function OrderDetail() {
     // Only the admin sees every share, so only the admin is told who is still unpaid.
     const isAdmin = order.view_as === 'platform';
     const awaitingPayout = isAdmin ? order.splits.filter((s) => s.recipient && s.status === 'released') : [];
-    const nextStep =
-        order.status === 'confirmed' && awaitingPayout.length > 0
+    const disputes = (order.payments ?? []).filter((p) => p.dispute_status);
+    const nextStep = order.open_refund_request
+        ? 'Refund requested. Waiting for SkillMatch to review it.'
+        : order.status === 'confirmed' && awaitingPayout.length > 0
             ? `Confirmed. Waiting to pay ${awaitingPayout.map((s) => s.recipient.name).join(' and ')}${
                   order.gateway === 'stripe' ? ': they need to finish Stripe payout setup in their Wallet.' : '.'
               }`
@@ -100,15 +108,68 @@ export default function OrderDetail() {
                             Confirm training received
                         </Button>
                     )}
-                    {order.can.refund && (
-                        <Button variant="danger" disabled={busy} onClick={() => act('refund', { reason: 'Cancelled in PoC demo' })}>
-                            Cancel &amp; refund
+                    {order.can.request_refund && !refunding && (
+                        <Button variant="danger" disabled={busy} onClick={() => setRefunding(true)}>
+                            Request refund
+                        </Button>
+                    )}
+                    {order.can.refund && !refunding && (
+                        <Button variant="danger" disabled={busy} onClick={() => setRefunding(true)}>
+                            Refund
                         </Button>
                     )}
                 </div>
             </div>
 
+            {order.refund_blocker && ['paid', 'completed', 'confirmed'].includes(order.status) && (
+                <p className="text-xs text-slate-500">{order.refund_blocker}</p>
+            )}
+
+            {refunding && (order.can.request_refund || order.can.refund) && (
+                <RefundForm
+                    order={order}
+                    max={isAdmin ? order.refundable_sen : order.refund_policy.buyer_max_sen}
+                    chooseFee={isAdmin}
+                    note={
+                        !isAdmin && order.refund_policy.buyer_max_percent < 100
+                            ? `The training has been delivered, so you can ask for up to ${order.refund_policy.buyer_max_percent}% of what you paid.`
+                            : null
+                    }
+                    title={isAdmin ? 'Refund the buyer' : 'Ask SkillMatch for a refund'}
+                    submitLabel={isAdmin ? 'Refund now' : 'Send request'}
+                    busy={busy}
+                    onCancel={() => setRefunding(false)}
+                    onSubmit={async (body) => {
+                        if (await act(isAdmin ? 'refunds' : 'refund-requests', body)) setRefunding(false);
+                    }}
+                />
+            )}
+
             <ErrorNote error={error} />
+
+            {disputes.map((p) =>
+                p.dispute_status === 'open' ? (
+                    <div key={p.id} className="rounded-xl bg-rose-50 p-4 text-sm text-rose-900 ring-1 ring-rose-200">
+                        <div className="font-medium">Payment disputed{p.dispute_amount_sen ? ` (${rm(p.dispute_amount_sen)})` : ''}</div>
+                        {isAdmin ? (
+                            <p className="mt-1">
+                                The buyer’s card issuer opened a chargeback{p.dispute_reason ? ` (${p.dispute_reason.replaceAll('_', ' ')})` : ''}. Payouts and refunds
+                                are paused until it’s decided. Submit evidence in the {gatewayName} dashboard
+                                {p.dispute_reference && <span className="font-mono text-xs"> ({p.dispute_reference})</span>}.
+                            </p>
+                        ) : (
+                            <p className="mt-1">Your bank is reviewing this payment. SkillMatch will follow its decision.</p>
+                        )}
+                    </div>
+                ) : (
+                    isAdmin && (
+                        <p key={p.id} className="text-sm text-slate-600">
+                            Chargeback {p.dispute_status}
+                            {p.dispute_status === 'lost' ? ': the card issuer returned the money to the buyer. It’s recorded as a refund below.' : ': payouts resumed.'}
+                        </p>
+                    )
+                ),
+            )}
 
             <div className="grid gap-4 lg:grid-cols-3">
                 {isAdmin && (
@@ -152,6 +213,12 @@ export default function OrderDetail() {
                 </Card>
             </div>
 
+            {order.refunds?.length > 0 && (
+                <Card title="Refunds">
+                    <RefundList order={order} busy={busy} post={post} />
+                </Card>
+            )}
+
             <div className="grid gap-4 lg:grid-cols-3">
                 <Card title="Timeline">
                     <ol className="space-y-2 text-sm">
@@ -179,26 +246,16 @@ export default function OrderDetail() {
                                         <td className="py-2 text-right tabular-nums">{rm(p.amount_sen)}</td>
                                         <td className="py-2 pl-4">
                                             <Badge status={p.status} />
-                                        </td>
-                                    </tr>
-                                ))}
-                                {order.refunds.map((r) => (
-                                    <tr key={`r${r.id}`}>
-                                        <td className="py-2">Refund · {r.reason}</td>
-                                        <td className="break-all px-2 py-2 font-mono text-xs text-slate-500">{r.gateway_reference}</td>
-                                        <td className="py-2 text-right tabular-nums">{rm(r.amount_sen)}</td>
-                                        <td className="py-2 pl-4">
-                                            <Badge status={r.status === 'succeeded' ? 'refunded' : r.status} />
+                                            {p.dispute_status && (
+                                                <div className="mt-1">
+                                                    <Badge status={p.dispute_status} />
+                                                </div>
+                                            )}
                                         </td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
-                        {order.refunds.some((r) => r.status === 'manual_required') && (
-                            <p className="mt-2 text-xs text-amber-700">
-                                This gateway cannot refund automatically: finish the refund in the gateway dashboard.
-                            </p>
-                        )}
                     </Card>
                 )}
             </div>

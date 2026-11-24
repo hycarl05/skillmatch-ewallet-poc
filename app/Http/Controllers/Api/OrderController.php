@@ -78,12 +78,6 @@ class OrderController extends Controller
         return response()->json(Present::order($this->orders->confirm($order, $request->user()), $request->user(), true));
     }
 
-    public function refund(Request $request, Order $order): JsonResponse
-    {
-        $reason = $request->validate(['reason' => ['nullable', 'string', 'max:255']])['reason'] ?? 'Cancelled by user';
-
-        return response()->json(Present::order($this->orders->refund($order, $request->user(), $reason), $request->user(), true));
-    }
 
     private function authorizeView(User $user, Order $order): void
     {

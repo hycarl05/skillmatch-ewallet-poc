@@ -8,9 +8,11 @@ use App\Http\Presenters\Present;
 use App\Models\LedgerEntry;
 use App\Models\OrderSplit;
 use App\Models\Payment;
+use App\Models\Refund;
 use App\Services\Ledger;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 /**
  * The "e-wallet" a user sees. It's a view over the ledger: SkillMatch
@@ -21,7 +23,7 @@ class WalletController extends Controller
     public function show(Request $request, Ledger $ledger): JsonResponse
     {
         $user = $request->user();
-        $codes = [$ledger->held($user), $ledger->payable($user), $ledger->receivable($user)];
+        $codes = [$ledger->held($user), $ledger->payable($user), $ledger->receivable($user), $ledger->feeDebt($user)];
 
         $entries = LedgerEntry::query()
             ->whereHas('account', fn ($q) => $q->whereIn('code', $codes))
@@ -46,13 +48,15 @@ class WalletController extends Controller
             'earnings' => [
                 'held_sen' => $ledger->balance($codes[0]),
                 'releasing_sen' => $ledger->balance($codes[1]),
-                'paid_out_sen' => (int) OrderSplit::where('recipient_id', $user->id)->where('status', SplitStatus::PaidOut)->sum('amount_sen'),
-                'owed_back_sen' => $ledger->balance($codes[2]),
+                'paid_out_sen' => (int) OrderSplit::where('recipient_id', $user->id)->where('status', SplitStatus::PaidOut)->sum(DB::raw('amount_sen - refunded_sen')),
+                // Shares refunded after they were paid, plus refund fees charged to them.
+                'owed_back_sen' => $ledger->balance($codes[2]) + $ledger->balance($codes[3]),
                 'entries' => $entries,
             ],
             'spending' => [
-                'paid_sen' => (int) Payment::where('status', 'paid')->whereHas('order', fn ($q) => $q->where('buyer_id', $user->id))->sum('amount_sen'),
-                'refunded_sen' => (int) Payment::where('status', 'refunded')->whereHas('order', fn ($q) => $q->where('buyer_id', $user->id))->sum('amount_sen'),
+                'paid_sen' => (int) Payment::whereIn('status', ['paid', 'refunded'])->whereHas('order', fn ($q) => $q->where('buyer_id', $user->id))->sum('amount_sen'),
+                // Only what has actually been sent back, not refunds still waiting or failed.
+                'refunded_sen' => (int) Refund::whereIn('status', [Refund::PENDING, Refund::SUCCEEDED])->whereHas('order', fn ($q) => $q->where('buyer_id', $user->id))->sum('amount_sen'),
             ],
         ]);
     }

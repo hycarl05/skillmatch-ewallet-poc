@@ -30,6 +30,30 @@ return [
     // confirmed automatically (deferred payout mode only).
     'auto_confirm_days' => (int) env('SKILLMATCH_AUTO_CONFIRM_DAYS', 3),
 
+    'refunds' => [
+        // How long after confirming a training the buyer can still ask for a
+        // refund. Before confirmation they can always ask. SkillMatch approves
+        // every request, and can refund at any time itself.
+        'request_window_days' => (int) env('SKILLMATCH_REFUND_WINDOW_DAYS', 14),
+
+        // The most a buyer can ask back, in % of what they paid, by how far the
+        // order has gone (refunds already made count towards it). SkillMatch
+        // can still refund more itself, e.g. when the trainer was at fault.
+        'buyer_max_percent' => [
+            'paid' => (int) env('SKILLMATCH_REFUND_MAX_BEFORE_COMPLETION', 100),
+            'completed' => (int) env('SKILLMATCH_REFUND_MAX_AFTER_COMPLETION', 50),
+            'confirmed' => (int) env('SKILLMATCH_REFUND_MAX_AFTER_COMPLETION', 50),
+        ],
+
+        // The gateway keeps its processing fee when money is refunded. Each
+        // refund carries its share of that fee (fee x refunded / paid), paid by:
+        //   buyer      - changed their mind: deducted from what they get back
+        //   trainer    - trainer cancelled or didn't deliver: owed by the
+        //                trainer, kept from their next payout
+        //   skillmatch - goodwill: SkillMatch absorbs it
+        'fee_paid_by' => ['buyer', 'trainer', 'skillmatch'],
+    ],
+
     // Gateway used when the checkout request doesn't name one.
     'default_gateway' => env('PAYMENT_GATEWAY', 'fake'),
 
@@ -46,6 +70,9 @@ return [
             'class' => App\Payments\Gateways\FakeGateway::class,
             'payout_modes' => ['instant', 'deferred'], // the simulator can show both
             'secret' => env('FAKE_GATEWAY_SECRET', 'local-fake-gateway-secret'),
+            // Simulated processing fee, so fee rules can be tried locally.
+            'fee_percent' => (float) env('FAKE_GATEWAY_FEE_PERCENT', 3),
+            'fee_fixed_sen' => (int) env('FAKE_GATEWAY_FEE_FIXED_SEN', 100),
         ],
         'billplz' => [
             'class' => App\Payments\Gateways\BillplzGateway::class,

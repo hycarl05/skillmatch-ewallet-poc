@@ -22,7 +22,13 @@ export default function Orders() {
     // Each person sees only their own figure: the buyer what they paid, the trainer what they receive.
     const amount = (o) => {
         if (o.view_as === 'trainer') return { value: rm(o.my_amount_sen), hint: 'you receive' };
-        if (o.amount_sen !== undefined) return { value: rm(o.amount_sen), hint: o.view_as === 'buyer' ? 'you paid' : 'paid' };
+        if (o.amount_sen !== undefined) {
+            const partlyRefunded = o.refunded_sen > 0 && o.status !== 'refunded';
+            return {
+                value: rm(o.amount_sen),
+                hint: partlyRefunded ? `${rm(o.refunded_sen)} refunded` : o.view_as === 'buyer' ? 'you paid' : 'paid',
+            };
+        }
         return { value: '—', hint: '' };
     };
 
@@ -69,6 +75,8 @@ export default function Orders() {
                                     </td>
                                     <td className="py-2 pr-4">
                                         <Badge status={o.status} />
+                                        {o.open_refund_request && <div className="mt-1 text-xs text-amber-700">Refund requested</div>}
+                                        {o.disputed && <div className="mt-1 text-xs text-rose-700">Disputed</div>}
                                     </td>
                                     <td className="py-2 text-slate-500">{when(o.timestamps.created_at)}</td>
                                 </tr>

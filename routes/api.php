@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\DemoController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\PlatformController;
+use App\Http\Controllers\Api\RefundController;
 use App\Http\Controllers\Api\StripeConnectController;
 use App\Http\Controllers\Api\TrainingController;
 use App\Http\Controllers\Api\WalletController;
@@ -25,7 +26,13 @@ Route::middleware(DemoUser::class)->group(function () {
     Route::get('orders/{order}', [OrderController::class, 'show']);
     Route::post('orders/{order}/complete', [OrderController::class, 'complete']);
     Route::post('orders/{order}/confirm', [OrderController::class, 'confirm']);
-    Route::post('orders/{order}/refund', [OrderController::class, 'refund']);
+    Route::post('orders/{order}/refund-requests', [RefundController::class, 'request']);
+    Route::post('orders/{order}/refunds', [RefundController::class, 'store']);
+    Route::post('refunds/{refund}/approve', [RefundController::class, 'approve']);
+    Route::post('refunds/{refund}/reject', [RefundController::class, 'reject']);
+    Route::post('refunds/{refund}/retry', [RefundController::class, 'retry']);
+    Route::post('refunds/{refund}/mark-sent', [RefundController::class, 'markSent']);
+    Route::get('platform/refunds', [RefundController::class, 'queue']);
 
     Route::get('wallet', [WalletController::class, 'show']);
     Route::get('stripe/connect', [StripeConnectController::class, 'status']);

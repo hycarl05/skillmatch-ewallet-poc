@@ -67,6 +67,29 @@ class Order extends Model
         return $this->hasMany(LedgerTransaction::class);
     }
 
+    /** Money given back to the buyer, or committed to be (failed / manual refunds are still owed). */
+    public function refundedSen(): int
+    {
+        return (int) $this->refunds()->whereIn('status', Refund::COMMITTED)->sum('amount_sen');
+    }
+
+    /** What part of the payment can still be refunded. A fee kept from a refund counts as refunded. */
+    public function refundableSen(): int
+    {
+        return max(0, $this->amount_sen - (int) $this->refunds()->whereIn('status', Refund::COMMITTED)->sum('gross_sen'));
+    }
+
+    /** Processing fees on refunds that the buyer or trainer paid instead of SkillMatch. */
+    public function refundFeesRecoveredSen(): int
+    {
+        return (int) $this->refunds()->whereIn('status', Refund::COMMITTED)->whereIn('fee_paid_by', [Refund::FEE_BUYER, Refund::FEE_TRAINER])->sum('fee_sen');
+    }
+
+    public function hasOpenDispute(): bool
+    {
+        return $this->payments()->where('dispute_status', 'open')->exists();
+    }
+
     public function isSeller(User $user): bool
     {
         return $this->training->seller_id === $user->id;

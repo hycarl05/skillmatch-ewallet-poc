@@ -19,8 +19,16 @@ class OrderSplit extends Model
             'role' => SplitRole::class,
             'status' => SplitStatus::class,
             'amount_sen' => 'integer',
+            'refunded_sen' => 'integer',
+            'payout_offset_sen' => 'integer',
             'paid_out_at' => 'datetime',
         ];
+    }
+
+    /** The share after refunds: what the recipient keeps (or is still owed). */
+    public function remainingSen(): int
+    {
+        return $this->amount_sen - $this->refunded_sen;
     }
 
     public function order(): BelongsTo

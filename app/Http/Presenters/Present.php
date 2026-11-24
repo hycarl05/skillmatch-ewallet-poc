@@ -5,8 +5,10 @@ namespace App\Http\Presenters;
 use App\Enums\OrderStatus;
 use App\Models\LedgerEntry;
 use App\Models\Order;
+use App\Models\Refund;
 use App\Models\Training;
 use App\Models\User;
+use App\Services\RefundService;
 
 /** Turns models into the JSON the React app uses. */
 class Present
@@ -60,13 +62,17 @@ class Present
             default => 'attendee',
         };
 
+        $requestBlocker = $isBuyer ? app(RefundService::class)->requestBlocker($order) : null;
+
         $split = fn ($s) => [
             'id' => $s->id,
             'role' => $s->role->value,
             'recipient' => self::user($s->recipient),
             'amount_sen' => $s->amount_sen,
+            'refunded_sen' => $s->refunded_sen,
             'status' => $s->status->value,
             'payout_reference' => $s->payout_reference,
+            'payout_offset_sen' => $s->payout_offset_sen,
         ];
 
         $data = [
@@ -91,9 +97,11 @@ class Present
                 'pay' => $isBuyer && $order->status === OrderStatus::PendingPayment,
                 'complete' => $isTrainer && $order->status === OrderStatus::Paid,
                 'confirm' => $isBuyer && $order->status === OrderStatus::Completed,
-                'refund' => ($isBuyer && $order->status === OrderStatus::Paid)
-                    || ($isPlatform && in_array($order->status, [OrderStatus::Paid, OrderStatus::Completed], true)),
+                'request_refund' => $isBuyer && $requestBlocker === null,
+                'refund' => $isPlatform && app(RefundService::class)->refundBlocker($order) === null,
             ],
+            // Shown instead of the refund button, so the buyer knows why there isn't one.
+            'refund_blocker' => $requestBlocker,
             'checkout_url' => $isBuyer && $order->status === OrderStatus::PendingPayment ? $order->payments()->latest()->value('checkout_url') : null,
         ];
 
@@ -103,6 +111,17 @@ class Present
                 'skillpoints_used' => $order->skillpoints_used,
                 'discount_sen' => $order->discount_sen,
                 'amount_sen' => $order->amount_sen,
+                'refunded_sen' => $order->refundedSen(),
+                'refundable_sen' => $order->refundableSen(),
+                // For the refund form: the most the buyer can ask for now, and the
+                // processing fee a buyer-paid refund shares in (null = not known).
+                'refund_policy' => [
+                    'buyer_max_sen' => app(RefundService::class)->buyerMaxSen($order),
+                    'buyer_max_percent' => config('skillmatch.refunds.buyer_max_percent')[$order->status->value] ?? null,
+                    'payment_fee_sen' => $order->payments()->whereIn('status', ['paid', 'refunded'])->latest('id')->value('gateway_fee_sen'),
+                ],
+                'open_refund_request' => $order->refunds()->where('status', Refund::REQUESTED)->exists(),
+                'disputed' => $order->hasOpenDispute(),
             ];
         }
 
@@ -111,6 +130,7 @@ class Present
                 'platform_fee_sen' => $order->platform_fee_sen,
                 'platform_fee_percent' => $order->gross_sen > 0 ? round($order->platform_fee_sen * 100 / $order->gross_sen, 2) : 0,
                 // Null until the gateway reports it (FakePay / Billplz / CHIP never do here).
+                'refund_fees_recovered_sen' => $order->refundFeesRecoveredSen(),
                 'processing_fee_sen' => $order->payments()->whereNotNull('gateway_fee_sen')->exists()
                     ? (int) $order->payments()->sum('gateway_fee_sen')
                     : null,
@@ -121,14 +141,16 @@ class Present
         if ($viewAs === 'trainer') {
             // Only their own share(s), never the buyer's payment or other people's cut.
             $data['my_splits'] = $order->splits->where('recipient_id', $viewer->id)->map($split)->values();
-            $data['my_amount_sen'] = (int) $order->splits->where('recipient_id', $viewer->id)->sum('amount_sen');
+            $mine = $order->splits->where('recipient_id', $viewer->id);
+            $data['my_amount_sen'] = (int) $mine->sum(fn ($s) => $s->remainingSen()); // after refunds
+            $data['my_refunded_sen'] = (int) $mine->sum('refunded_sen');
         }
 
         if ($detail) {
             if ($viewAs === 'platform' || $viewAs === 'buyer') {
-                $data['payments'] = $order->payments()->get(['id', 'gateway', 'gateway_reference', 'amount_sen', 'gateway_fee_sen', 'status', 'paid_at', 'created_at'])
-                    ->each(fn ($p) => $viewAs === 'platform' ? null : $p->makeHidden('gateway_fee_sen'));
-                $data['refunds'] = $order->refunds()->get(['id', 'amount_sen', 'status', 'gateway_reference', 'reason', 'created_at']);
+                $data['payments'] = $order->payments()->get(['id', 'gateway', 'gateway_reference', 'amount_sen', 'gateway_fee_sen', 'status', 'paid_at', 'created_at', 'dispute_reference', 'dispute_status', 'dispute_reason', 'dispute_amount_sen'])
+                    ->each(fn ($p) => $viewAs === 'platform' ? null : $p->makeHidden(['gateway_fee_sen', 'dispute_reference', 'dispute_reason']));
+                $data['refunds'] = $order->refunds()->with('requester', 'reviewer')->latest('id')->get()->map(fn (Refund $r) => self::refund($r, $viewAs))->values();
             }
 
             // The ledger records every party's money, so only SkillMatch sees it.
@@ -144,6 +166,48 @@ class Present
         }
 
         return $data;
+    }
+
+    /** The buyer sees their refunds; only SkillMatch sees how each was split and the clawbacks. */
+    public static function refund(Refund $refund, string $viewAs): array
+    {
+        $data = [
+            'id' => $refund->id,
+            'source' => $refund->source,
+            'amount_sen' => $refund->amount_sen, // what the buyer gets
+            'gross_sen' => $refund->gross_sen ?? $refund->amount_sen,
+            'fee_paid_by' => $refund->fee_paid_by,
+            // The buyer only sees the fee when it came out of their refund.
+            'fee_sen' => $viewAs === 'platform' || $refund->fee_paid_by === Refund::FEE_BUYER ? $refund->fee_sen : null,
+            'status' => $refund->status,
+            'reason' => $refund->reason,
+            'review_note' => $refund->review_note,
+            'created_at' => $refund->created_at,
+            'reviewed_at' => $refund->reviewed_at,
+            'completed_at' => $refund->completed_at,
+        ];
+
+        if ($viewAs !== 'platform') {
+            return $data;
+        }
+
+        $outstanding = $refund->outstandingClawbacks();
+
+        return $data + [
+            'gateway_reference' => $refund->gateway_reference,
+            'requested_by' => $refund->requester?->name,
+            'reviewed_by' => $refund->reviewer?->name,
+            'attempts' => $refund->attempts,
+            'failure_reason' => $refund->failure_reason,
+            'allocation' => $refund->allocation ?? [],
+            'actions' => [
+                'approve' => $refund->status === Refund::REQUESTED,
+                'reject' => $refund->status === Refund::REQUESTED,
+                'retry' => $refund->status === Refund::FAILED
+                    || (in_array($refund->status, [Refund::PENDING, Refund::SUCCEEDED], true) && $outstanding !== [] && $refund->order->payout_mode->value === 'deferred'),
+                'mark_sent' => in_array($refund->status, Refund::OWED, true),
+            ],
+        ];
     }
 
     public static function entry(LedgerEntry $entry): array

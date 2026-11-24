@@ -87,6 +87,47 @@ class StripeGateway implements PaymentGateway, ReportsProcessingFee
         }
 
         $object = $event->data->object;
+
+        // refund.created / refund.updated / refund.failed / charge.refund.updated
+        if (($object->object ?? null) === 'refund') {
+            $metadata = $object->metadata ?? null;
+
+            return new WebhookResult(
+                reference: (string) $object->id,
+                status: match ($object->status) {
+                    'succeeded' => WebhookResult::SUCCEEDED,
+                    'failed', 'canceled' => WebhookResult::FAILED,
+                    default => WebhookResult::PENDING,
+                },
+                amountSen: (int) $object->amount,
+                eventKey: $event->id,
+                payload: $event->toArray(),
+                kind: WebhookResult::KIND_REFUND,
+                // Matches a refund made in the Stripe dashboard to its payment.
+                gatewayPaymentId: is_string($object->payment_intent ?? null) ? $object->payment_intent : null,
+                message: $object->failure_reason ?? $object->reason ?? null,
+                ownReference: isset($metadata['skillmatch_refund_id']) ? (string) $metadata['skillmatch_refund_id'] : null,
+            );
+        }
+
+        // charge.dispute.created / updated / closed
+        if (($object->object ?? null) === 'dispute') {
+            return new WebhookResult(
+                reference: (string) $object->id,
+                status: match ($object->status) {
+                    'won', 'warning_closed', 'prevented' => WebhookResult::DISPUTE_WON,
+                    'lost' => WebhookResult::DISPUTE_LOST,
+                    default => WebhookResult::DISPUTE_OPEN,
+                },
+                amountSen: (int) $object->amount,
+                eventKey: $event->id,
+                payload: $event->toArray(),
+                kind: WebhookResult::KIND_DISPUTE,
+                gatewayPaymentId: is_string($object->payment_intent ?? null) ? $object->payment_intent : null,
+                message: $object->reason ?? null,
+            );
+        }
+
         $isSession = ($object->object ?? null) === 'checkout.session';
 
         // FPX and other bank redirects can complete asynchronously, so a
@@ -104,31 +145,31 @@ class StripeGateway implements PaymentGateway, ReportsProcessingFee
             amountSen: $isSession && $object->amount_total !== null ? (int) $object->amount_total : null,
             eventKey: $event->id,
             payload: $event->toArray(),
+            gatewayPaymentId: $isSession && is_string($object->payment_intent ?? null) ? $object->payment_intent : null,
         );
     }
 
-    public function refund(Payment $payment, int $amountSen): RefundResult
+    public function refund(Payment $payment, int $amountSen, string $idempotencyKey, array $metadata = []): RefundResult
     {
-        $payment->loadMissing('order');
-
         try {
-            $session = $this->stripe->checkout->sessions->retrieve($payment->gateway_reference);
+            $paymentIntent = $payment->gateway_payment_id
+                ?? $this->stripe->checkout->sessions->retrieve($payment->gateway_reference)->payment_intent;
 
             $refund = $this->stripe->refunds->create([
-                'payment_intent' => $session->payment_intent,
+                'payment_intent' => $paymentIntent,
                 'amount' => $amountSen,
-                'metadata' => ['payment_id' => (string) $payment->id],
-            ], ['idempotency_key' => "refund-{$payment->order->reference}-{$payment->id}-{$amountSen}"]);
+                'metadata' => ['payment_id' => (string) $payment->id] + $metadata,
+            ], ['idempotency_key' => $idempotencyKey]);
         } catch (ApiErrorException $e) {
-            return new RefundResult(RefundResult::MANUAL_REQUIRED, message: 'Stripe refund failed: '.$e->getMessage());
+            return new RefundResult(RefundResult::FAILED, message: 'Stripe refund failed: '.$e->getMessage());
         }
 
-        if (in_array($refund->status, ['failed', 'canceled'], true)) {
-            return new RefundResult(RefundResult::MANUAL_REQUIRED, $refund->id, "Stripe refund {$refund->status}");
-        }
-
-        // "pending" refunds (common for FPX) complete on their own.
-        return new RefundResult(RefundResult::SUCCEEDED, $refund->id);
+        return match ($refund->status) {
+            'succeeded' => new RefundResult(RefundResult::SUCCEEDED, $refund->id),
+            'failed', 'canceled' => new RefundResult(RefundResult::FAILED, $refund->id, "Stripe refund {$refund->status}: ".($refund->failure_reason ?? 'no reason given')),
+            // pending / requires_action (common for FPX): the outcome arrives as a refund.updated webhook.
+            default => new RefundResult(RefundResult::PENDING, $refund->id),
+        };
     }
 
     /** Stripe's fee lives on the charge's balance transaction. */

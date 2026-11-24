@@ -11,6 +11,16 @@ const STATUS_STYLE = {
     refunded: 'bg-slate-100 text-slate-700 ring-slate-300',
     reversed: 'bg-slate-100 text-slate-700 ring-slate-300',
     clawback_required: 'bg-rose-50 text-rose-800 ring-rose-200',
+    // refunds
+    requested: 'bg-amber-50 text-amber-800 ring-amber-200',
+    rejected: 'bg-slate-100 text-slate-700 ring-slate-300',
+    processing: 'bg-sky-50 text-sky-800 ring-sky-200',
+    succeeded: 'bg-emerald-50 text-emerald-800 ring-emerald-200',
+    manual_required: 'bg-amber-50 text-amber-800 ring-amber-200',
+    // disputes
+    open: 'bg-rose-50 text-rose-800 ring-rose-200',
+    won: 'bg-emerald-50 text-emerald-800 ring-emerald-200',
+    lost: 'bg-rose-50 text-rose-800 ring-rose-200',
 };
 
 export function Badge({ status }) {

@@ -11,7 +11,18 @@ class Payment extends Model
 
     protected function casts(): array
     {
-        return ['order_id' => 'integer', 'amount_sen' => 'integer', 'gateway_fee_sen' => 'integer', 'paid_at' => 'datetime'];
+        return [
+            'order_id' => 'integer',
+            'amount_sen' => 'integer',
+            'gateway_fee_sen' => 'integer',
+            'dispute_amount_sen' => 'integer',
+            'paid_at' => 'datetime',
+        ];
+    }
+
+    public function hasOpenDispute(): bool
+    {
+        return $this->dispute_status === 'open';
     }
 
     public function order(): BelongsTo
