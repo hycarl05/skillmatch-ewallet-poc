@@ -49,13 +49,33 @@ Requirements: PHP 8.4+, Composer, Node 22+.
 ```bash
 git clone https://github.com/hycarl05/skillmatch-ewallet-poc.git
 cd skillmatch-ewallet-poc
-composer setup        # install, .env, key, SQLite DB, migrate + seed, build frontend
-composer dev          # runs the Laravel server and Vite together
+composer setup        # once: install, .env, key, SQLite DB, migrate + seed, build frontend
+composer dev          # every time: Laravel server, Vite and the queue worker together
 ```
 
-Open http://localhost:8000. To start again with fresh data: `php artisan migrate:fresh --seed`.
+Open http://127.0.0.1:8010. **Ctrl+C** stops everything. Use the *Acting as* menu (top right) to switch between demo users; **SkillMatch Admin** opens on the dashboard.
+
+| What | Where |
+|---|---|
+| App | http://127.0.0.1:8010 (`SERVER_PORT` in `.env`) |
+| Vite dev server | 127.0.0.1:5174 (fixed in `vite.config.js`) |
+
+These aren't Laravel's defaults (8000 / 5173), so this app can run next to another project that uses those.
+
+To start again with fresh data: `php artisan migrate:fresh --seed`.
 
 Run the tests: `php artisan test`. They also run on GitHub Actions on every push.
+
+#### Sharing on your Wi-Fi
+
+To let someone on the same network open your copy, set `VITE_DEV_HOST` in `.env` to your Wi-Fi IP (`ipconfig` → *Wireless LAN adapter Wi-Fi → IPv4 Address*) and restart `composer dev`. They open `http://<that-ip>:8010`. Clear it again afterwards: if your IP changes, the page goes blank because it looks for Vite at the old address.
+
+#### Blank page?
+
+- **`composer dev` isn't running**, or one of its processes stopped. Restart it.
+- **A port is taken.** Another `composer dev` is still open in a different terminal. Close it, or restart VS Code. VS Code's *Ports* tab can also hold a port it forwarded; remove it there.
+- **Vite crashed and left `public/hot` behind.** Delete that file, or run `npm run build`, and the page uses the built assets instead.
+- **Check the browser console** (F12). Requests failing to `:5174` mean Vite isn't reachable.
 
 ### Demo walkthrough (no gateway account needed)
 
@@ -69,6 +89,27 @@ The built-in **FakePay** simulator behaves like a real gateway: hosted payment p
 6. On a new order, as **Aisyah** click **Request refund** (try half the amount). Switch to **SkillMatch Admin**: the request is on *Platform ledger → Refunds to handle*. Approve it, or approve less, and see how each share gave back its part.
 7. Refund a **confirmed** deferred order: the trainer's payout is reversed (`fake_reversal_…`).
 8. Repeat with payout mode **instant** and refund: the trainer was already paid by the gateway, so the share is `clawback_required`.
+9. As **SkillMatch Admin**, open the **Dashboard** and click the tallest bar to drill into that day (see below).
+
+## Admin dashboard
+
+**SkillMatch Admin** → *Dashboard* (the admin's start page) shows what's happening and what needs attention.
+
+- **Needs attention:** refund requests to decide, refunds owed to buyers, trainer shares to claw back, open chargebacks, money held for trainers, and whether the ledger balances. A tile turns amber when there's something to do, and links to *Platform ledger*.
+- **Totals for the period:** money collected, SkillMatch commission (after SkillPoints discounts and refunds), refunded, and orders. Click a total to make the main chart show it.
+- **Period:** 7, 30 or 90 days (one bar per day) or 12 months (one bar per month). Days are counted in Malaysian time.
+
+**Drill down** by clicking a bar:
+
+```
+Collected by day  ──click a bar──>  that day by training / trainer / buyer / gateway / status  ──click a row──>  the orders
+```
+
+The breadcrumb above the chart (*Collected by day › Fri, 20 Nov › Training: Leadership Essentials*) goes back up. *Break down the whole period* skips the day step. The side charts (orders by status, collected by gateway, top trainings, top trainers) open their orders directly. **Show table** gives the exact numbers instead of the chart, and the bars work with the keyboard (Tab, Enter).
+
+"Collected" counts only orders the gateway confirmed as paid; unpaid and failed orders count as RM0 but still appear under *Orders*.
+
+The data comes from `GET /api/platform/dashboard?days=30` (admin only): one row per order plus the attention counts. The browser does the grouping, which is fine for a PoC. With thousands of orders a month the totals should move to the server.
 
 ## Using the real sandboxes
 
@@ -77,7 +118,7 @@ The gateway can be chosen at checkout. FakePay always works; Billplz and CHIP ne
 Gateways must be able to reach your webhook URL, so expose your local app with a tunnel:
 
 ```bash
-ngrok http 8000        # then set APP_URL=https://<your-id>.ngrok-free.app in .env
+ngrok http 8010        # then set APP_URL=https://<your-id>.ngrok-free.app in .env
 ```
 
 ### Billplz sandbox (instant split)
@@ -99,7 +140,7 @@ Payouts to trainers still go through the fake payout provider. Real payouts need
 Uses Stripe Checkout plus Connect *separate charges and transfers*: the buyer pays SkillMatch's Stripe account, and each trainer's share is transferred to their **Express** connected account when the training is confirmed.
 
 1. Put your **test** keys in `STRIPE_KEY` and `STRIPE_SECRET_KEY`.
-2. Forward webhooks locally (no tunnel needed): `stripe listen --forward-to localhost:8000/api/webhooks/stripe --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired,refund.created,refund.updated,refund.failed,charge.dispute.created,charge.dispute.updated,charge.dispute.closed`, then copy the printed `whsec_…` into `STRIPE_WEBHOOK_SECRET`.
+2. Forward webhooks locally (no tunnel needed): `stripe listen --forward-to localhost:8010/api/webhooks/stripe --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired,refund.created,refund.updated,refund.failed,charge.dispute.created,charge.dispute.updated,charge.dispute.closed`, then copy the printed `whsec_…` into `STRIPE_WEBHOOK_SECRET`.
 3. Turn on Connect in the dashboard, and FPX / GrabPay under *Settings → Payment methods* if you want them (Checkout shows whatever is enabled).
 4. As a trainer (Hafiz, Priya, Akademi Digital): *Wallet* → **Set up payouts** → finish Stripe's test onboarding.
 5. Buy a training with *Stripe*, pay with card `4242 4242 4242 4242`, complete and confirm it: the shares go out as Stripe transfers (`tr_…` in the split's payout reference).
@@ -119,7 +160,9 @@ As with CHIP, the money sits in SkillMatch's Stripe balance until confirmation. 
 | `app/Http/Controllers/WebhookController.php` | Signature check, duplicate protection, applies webhooks |
 | `config/skillmatch.php` | Fee %, SkillPoints rules, gateways and which payout modes each supports |
 | `database/migrations/2026_11_19_000001_create_ewallet_tables.php` | Orders, splits, payments, refunds, webhook events, ledger, SkillPoints |
-| `resources/js/` | React app: trainings, orders, order detail with ledger, wallet, platform ledger |
+| `app/Http/Controllers/Api/DashboardController.php` | Admin dashboard data: orders in the period and needs-attention counts |
+| `resources/js/` | React app: trainings, orders, order detail with ledger, wallet, platform ledger, admin dashboard |
+| `resources/js/charts.jsx` | Dependency-free SVG bar charts used by the dashboard (`pages/Dashboard.jsx`) |
 | `tests/` | Feature tests for every flow above, plus Billplz signature tests |
 
 ### Ledger accounts
