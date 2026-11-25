@@ -62,7 +62,9 @@ Open http://127.0.0.1:8010. **Ctrl+C** stops everything. Use the *Acting as* men
 
 These aren't Laravel's defaults (8000 / 5173), so this app can run next to another project that uses those.
 
-To start again with fresh data: `php artisan migrate:fresh --seed`.
+To fill the admin dashboard with about 60 days of orders (paid, confirmed, failed, refunded, a few refund requests waiting): `php artisan db:seed --class=DemoOrdersSeeder`. They go through the real order and refund flows on FakePay, so the ledger balances. It adds to what's there and runs only once.
+
+To start again with fresh data: `php artisan migrate:fresh --seed` (add the demo orders again afterwards if you want them).
 
 Run the tests: `php artisan test`. They also run on GitHub Actions on every push.
 
