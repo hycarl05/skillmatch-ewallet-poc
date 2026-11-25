@@ -8,6 +8,7 @@ import Orders from './pages/Orders';
 import OrderDetail from './pages/OrderDetail';
 import Wallet from './pages/Wallet';
 import Platform from './pages/Platform';
+import Dashboard from './pages/Dashboard';
 
 function App() {
     const [users, setUsers] = useState([]);
@@ -40,7 +41,9 @@ function App() {
         setCurrent(String(id));
     };
 
+    const isAdmin = me.role === 'platform';
     const nav = [
+        isAdmin && ['/dashboard', 'Dashboard'],
         canBuy(me.role) && ['/', 'Trainings'],
         ['/orders', 'Orders'],
         ['/wallet', 'Wallet'],
@@ -87,7 +90,8 @@ function App() {
             </header>
             <main className="mx-auto max-w-6xl px-4 py-6" key={me.id}>
                 <Routes>
-                    <Route path="/" element={canBuy(me.role) ? <Catalogue /> : <Navigate to="/orders" replace />} />
+                    <Route path="/" element={canBuy(me.role) ? <Catalogue /> : <Navigate to={isAdmin ? '/dashboard' : '/orders'} replace />} />
+                    <Route path="/dashboard" element={isAdmin ? <Dashboard /> : <Navigate to="/" replace />} />
                     <Route path="/orders" element={<Orders />} />
                     <Route path="/orders/:id" element={<OrderDetail />} />
                     <Route path="/wallet" element={<Wallet />} />

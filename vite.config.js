@@ -18,7 +18,8 @@ export default defineConfig(({ mode }) => {
             tailwindcss(),
         ],
         server: {
-            host: '0.0.0.0',
+            // Listen on the network only when sharing; otherwise localhost (browsers block 0.0.0.0 URLs).
+            host: devHost ? '0.0.0.0' : '127.0.0.1',
             port: 5174,
             strictPort: true,
             cors: true,

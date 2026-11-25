@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DemoController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\PlatformController;
@@ -38,4 +39,5 @@ Route::middleware(DemoUser::class)->group(function () {
     Route::get('stripe/connect', [StripeConnectController::class, 'status']);
     Route::post('stripe/connect', [StripeConnectController::class, 'onboard']);
     Route::get('platform/ledger', [PlatformController::class, 'ledger']);
+    Route::get('platform/dashboard', [DashboardController::class, 'show']);
 });
