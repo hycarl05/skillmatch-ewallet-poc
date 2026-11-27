@@ -100,9 +100,10 @@ class SubscriptionService
         };
     }
 
-    public function markInvoicePaid(SubscriptionInvoice $invoice, ?int $paidAmountSen): string
+    /** $gatewayPeriod: the invoice's period comes from the gateway (Stripe Billing) and replaces ours. */
+    public function markInvoicePaid(SubscriptionInvoice $invoice, ?int $paidAmountSen, bool $gatewayPeriod = false): string
     {
-        return DB::transaction(function () use ($invoice, $paidAmountSen) {
+        return DB::transaction(function () use ($invoice, $paidAmountSen, $gatewayPeriod) {
             $invoice = SubscriptionInvoice::whereKey($invoice->id)->lockForUpdate()->firstOrFail();
             $subscription = Subscription::whereKey($invoice->subscription_id)->lockForUpdate()->firstOrFail();
 
@@ -122,7 +123,7 @@ class SubscriptionService
             ]);
 
             $this->bookRevenue($invoice, $subscription);
-            $this->extendTo($subscription, $invoice->period_start, $invoice->period_end);
+            $this->extendTo($subscription, $invoice->period_start, $invoice->period_end, $gatewayPeriod);
 
             return 'subscription_paid';
         });
@@ -342,7 +343,7 @@ class SubscriptionService
 
         $subscription->update(['gateway_subscription_id' => $subscription->gateway_subscription_id ?? $result->gatewayPaymentId]);
 
-        return $this->markInvoicePaid($invoice, null);
+        return $this->markInvoicePaid($invoice, null, gatewayPeriod: true);
     }
 
     private function applyGatewaySubscriptionEnded(WebhookResult $result): string
@@ -413,15 +414,21 @@ class SubscriptionService
         return $subscription->plan->interval === 'year' ? $start->copy()->addYearNoOverflow() : $start->copy()->addMonthNoOverflow();
     }
 
-    /** Paid for this period: active, and the period moves forward (never back). */
-    private function extendTo(Subscription $subscription, Carbon $start, Carbon $end): void
+    /**
+     * Paid for this period: active, and the period moves forward (never back).
+     * A gateway-reported period (Stripe Billing) is the source of truth: it
+     * replaces our provisional dates unless it's an older period arriving late.
+     */
+    private function extendTo(Subscription $subscription, Carbon $start, Carbon $end, bool $gatewayPeriod = false): void
     {
-        $isNew = $subscription->status === Subscription::PENDING || $subscription->current_period_end === null;
+        $replace = $subscription->status === Subscription::PENDING
+            || $subscription->current_period_end === null
+            || ($gatewayPeriod ? $end->gt($subscription->current_period_start) : $end->gt($subscription->current_period_end));
 
         $subscription->update([
             'status' => Subscription::ACTIVE,
-            'current_period_start' => $isNew || $end->gt($subscription->current_period_end) ? $start : $subscription->current_period_start,
-            'current_period_end' => $isNew || $end->gt($subscription->current_period_end) ? $end : $subscription->current_period_end,
+            'current_period_start' => $replace ? $start : $subscription->current_period_start,
+            'current_period_end' => $replace ? $end : $subscription->current_period_end,
             'grace_ends_at' => null,
         ]);
     }

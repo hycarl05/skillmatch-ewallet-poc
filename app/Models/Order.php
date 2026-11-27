@@ -113,6 +113,8 @@ class Order extends Model
     {
         return $this->buyer_id === $user->id
             || $this->beneficiary_id === $user->id
-            || $this->splits->contains('recipient_id', $user->id);
+            || $this->splits->contains('recipient_id', $user->id)
+            // HRDC bookings carry no trainer split: the provider is paid by HRDC.
+            || ($this->isHrdcFunded() && $this->isSeller($user));
     }
 }
