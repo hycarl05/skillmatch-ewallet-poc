@@ -43,6 +43,32 @@ export const GATEWAY_LABEL = {
     stripe: 'Stripe',
 };
 
+// Stripe's FPX bank codes (charge.payment_method_details.fpx.bank).
+export const FPX_BANK_LABEL = {
+    affin_bank: 'Affin Bank',
+    agrobank: 'AGRONet',
+    alliance_bank: 'Alliance Bank',
+    ambank: 'AmBank',
+    bank_islam: 'Bank Islam',
+    bank_muamalat: 'Bank Muamalat',
+    bank_of_china: 'Bank of China',
+    bank_rakyat: 'Bank Rakyat',
+    bsn: 'BSN',
+    cimb: 'CIMB Clicks',
+    deutsche_bank: 'Deutsche Bank',
+    hong_leong_bank: 'Hong Leong Bank',
+    hsbc: 'HSBC Bank',
+    kfh: 'KFH',
+    maybank2e: 'Maybank2E',
+    maybank2u: 'Maybank2U',
+    ocbc: 'OCBC Bank',
+    pb_enterprise: 'PB Enterprise',
+    public_bank: 'Public Bank',
+    rhb: 'RHB Bank',
+    standard_chartered: 'Standard Chartered',
+    uob: 'UOB Bank',
+};
+
 // "4.2%" — share of a total, one decimal, without trailing ".0".
 export const pct = (part, total) => (total ? `${+((part / total) * 100).toFixed(1)}%` : '—');
 

@@ -15,6 +15,7 @@ use App\Models\Training;
 use App\Models\User;
 use App\Payments\GatewayManager;
 use App\Payments\PayoutResult;
+use App\Payments\ReportsPaymentMethod;
 use App\Payments\ReportsProcessingFee;
 use App\Payments\WebhookResult;
 use Illuminate\Support\Facades\DB;
@@ -278,6 +279,39 @@ class OrderService
                 ]);
             }
         });
+    }
+
+    /**
+     * Ask the gateway how the buyer paid (FPX bank and transaction id, card
+     * brand) for the confirmation page. Calls the gateway, so never run it
+     * inside a DB transaction. Safe to call repeatedly; does nothing once known.
+     */
+    public function recordPaymentMethod(Payment $payment): void
+    {
+        if ($payment->payment_method !== null || ! in_array($payment->status, ['paid', 'refunded'], true)) {
+            return;
+        }
+
+        $gateway = $this->gateways->gateway($payment->gateway);
+        if (! $gateway instanceof ReportsPaymentMethod) {
+            return;
+        }
+
+        try {
+            $used = $gateway->paymentMethod($payment);
+        } catch (Throwable $e) {
+            Log::warning('Could not fetch payment method', ['payment' => $payment->id, 'error' => $e->getMessage()]);
+
+            return;
+        }
+
+        if ($used !== null) {
+            $payment->update([
+                'payment_method' => $used->method,
+                'gateway_charge_id' => $used->chargeId,
+                'payment_method_details' => $used->details,
+            ]);
+        }
     }
 
     public function markPaymentFailed(Payment $payment): string

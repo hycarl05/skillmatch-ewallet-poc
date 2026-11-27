@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import AdminBreakdown, { BuyerPayment, TrainerEarnings } from '../MoneyBreakdown';
-import { GATEWAY_LABEL, api, rm, when } from '../lib';
+import { FPX_BANK_LABEL, GATEWAY_LABEL, api, rm, when } from '../lib';
 import { RefundForm, RefundList } from '../Refunds';
 import { Badge, Button, Card, ErrorNote } from '../ui';
 
@@ -12,6 +12,35 @@ function Fact({ label, value, hint }) {
             <dd className="font-medium text-slate-800">{value}</dd>
             {hint && <dd className="mt-0.5 text-xs text-slate-500">{hint}</dd>}
         </div>
+    );
+}
+
+// FPX requires the confirmation page to show the bank, FPX transaction id,
+// charge id, amount, date and status (the last three are in the same row).
+function PaymentMethod({ payment: p }) {
+    const d = p.payment_method_details ?? {};
+    if (p.payment_method === 'card') {
+        return <div className="text-xs text-slate-500">Card{d.brand ? ` · ${d.brand.toUpperCase()}` : ''}{d.last4 ? ` •••• ${d.last4}` : ''}</div>;
+    }
+    if (p.payment_method !== 'fpx') {
+        return p.payment_method ? <div className="text-xs text-slate-500">{p.payment_method}</div> : null;
+    }
+
+    return (
+        <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-slate-500">
+            <dt>Paid with</dt>
+            <dd className="text-slate-700">FPX · {FPX_BANK_LABEL[d.bank] ?? d.bank ?? 'bank not reported'}</dd>
+            <dt>FPX transaction ID</dt>
+            <dd className="break-all font-mono text-slate-700">{d.transaction_id ?? '—'}</dd>
+            <dt>Charge ID</dt>
+            <dd className="break-all font-mono text-slate-700">{p.gateway_charge_id ?? '—'}</dd>
+            {p.paid_at && (
+                <>
+                    <dt>Paid at</dt>
+                    <dd className="text-slate-700">{when(p.paid_at)}</dd>
+                </>
+            )}
+        </dl>
     );
 }
 
@@ -240,6 +269,7 @@ export default function OrderDetail() {
                                     <tr key={p.id}>
                                         <td className="py-2">
                                             Payment · {GATEWAY_LABEL[p.gateway] ?? p.gateway}
+                                            <PaymentMethod payment={p} />
                                             {p.gateway_fee_sen != null && <div className="text-xs text-slate-500">fee {rm(p.gateway_fee_sen)}</div>}
                                         </td>
                                         <td className="break-all px-2 py-2 font-mono text-xs text-slate-500">{p.gateway_reference}</td>

@@ -7,10 +7,13 @@ use App\Models\Payment;
 use App\Payments\CheckoutSession;
 use App\Payments\InvalidWebhookSignature;
 use App\Payments\PaymentGateway;
+use App\Payments\PaymentMethodUsed;
 use App\Payments\RefundResult;
+use App\Payments\ReportsPaymentMethod;
 use App\Payments\ReportsProcessingFee;
 use App\Payments\WebhookResult;
 use Illuminate\Http\Request;
+use Stripe\Charge;
 use Stripe\Exception\ApiErrorException;
 use Stripe\Exception\SignatureVerificationException;
 use Stripe\StripeClient;
@@ -27,7 +30,7 @@ use UnexpectedValueException;
  *
  * Stripe's session id is the payment's gateway_reference.
  */
-class StripeGateway implements PaymentGateway, ReportsProcessingFee
+class StripeGateway implements PaymentGateway, ReportsPaymentMethod, ReportsProcessingFee
 {
     public function __construct(private readonly StripeClient $stripe) {}
 
@@ -175,13 +178,51 @@ class StripeGateway implements PaymentGateway, ReportsProcessingFee
     /** Stripe's fee lives on the charge's balance transaction. */
     public function processingFee(Payment $payment): ?int
     {
-        $session = $this->stripe->checkout->sessions->retrieve($payment->gateway_reference, [
-            'expand' => ['payment_intent.latest_charge.balance_transaction'],
-        ]);
-
-        $balanceTransaction = $session->payment_intent?->latest_charge?->balance_transaction;
+        $balanceTransaction = $this->charge($payment)?->balance_transaction;
 
         // Not created yet for some async methods; the caller asks again later.
         return is_object($balanceTransaction) ? (int) $balanceTransaction->fee : null;
+    }
+
+    /** FPX requires showing the bank and FPX transaction id on the confirmation page. */
+    public function paymentMethod(Payment $payment): ?PaymentMethodUsed
+    {
+        $charge = $this->charge($payment);
+        $method = $charge?->payment_method_details;
+        if (! is_object($method) || ! is_string($method->type ?? null)) {
+            return null;
+        }
+
+        $specifics = $method->{$method->type} ?? null;
+
+        return new PaymentMethodUsed(
+            method: $method->type,
+            chargeId: (string) $charge->id,
+            details: match ($method->type) {
+                'fpx' => ['bank' => $specifics?->bank ?? null, 'transaction_id' => $specifics?->transaction_id ?? null],
+                'card' => ['brand' => $specifics?->brand ?? null, 'last4' => $specifics?->last4 ?? null],
+                default => [],
+            },
+        );
+    }
+
+    /** @var array<int, Charge|null> per payment id, so the fee and method share one API call */
+    private array $charges = [];
+
+    private function charge(Payment $payment): ?Charge
+    {
+        if (! array_key_exists($payment->id, $this->charges)) {
+            $session = $this->stripe->checkout->sessions->retrieve($payment->gateway_reference, [
+                'expand' => ['payment_intent.latest_charge.balance_transaction'],
+            ]);
+            $charge = $session->payment_intent?->latest_charge;
+            // Not cached while missing: an async payment's charge appears later.
+            if (! $charge instanceof Charge) {
+                return null;
+            }
+            $this->charges[$payment->id] = $charge;
+        }
+
+        return $this->charges[$payment->id];
     }
 }

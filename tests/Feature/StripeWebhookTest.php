@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Payments\GatewayManager;
 use App\Payments\Payouts\StripeConnectPayoutProvider;
 use App\Payments\Gateways\StripeGateway;
+use App\Payments\PaymentMethodUsed;
 use App\Payments\RefundResult;
 use App\Models\Refund;
 use App\Services\Ledger;
@@ -51,6 +52,7 @@ class StripeWebhookTest extends TestCase
     {
         $gateway = Mockery::mock(StripeGateway::class, [new StripeClient('sk_test_dummy')])->makePartial();
         $gateway->shouldReceive('processingFee')->andReturn($fee)->byDefault();
+        $gateway->shouldReceive('paymentMethod')->andReturn(null)->byDefault();
         $this->app->instance(StripeGateway::class, $gateway);
 
         return $gateway;
@@ -109,6 +111,32 @@ class StripeWebhookTest extends TestCase
         $this->stripeWebhook('evt_amt', 'checkout.session.completed', $payment, 'paid', amount: 100)
             ->assertJson(['result' => 'amount_mismatch']);
         $this->assertSame(OrderStatus::PendingPayment, $order->fresh()->status);
+    }
+
+    public function test_fpx_confirmation_details_are_shown_to_the_buyer_once_paid(): void
+    {
+        $this->fakeStripeFee(null)->shouldReceive('paymentMethod')->once()
+            ->andReturn(new PaymentMethodUsed('fpx', 'ch_test_fpx', ['bank' => 'maybank2u', 'transaction_id' => '2611271234567890']));
+
+        [$order, $payment] = $this->stripeOrder();
+        $buyer = $this->withHeader('X-Demo-User', (string) $order->buyer_id);
+
+        // Not asked while the FPX payment is still pending.
+        $this->stripeWebhook('evt_fpx_a', 'checkout.session.completed', $payment, 'unpaid')->assertJson(['result' => 'pending']);
+        $buyer->getJson("/api/orders/{$order->id}")->assertOk()->assertJsonPath('payments.0.payment_method', null);
+
+        $this->stripeWebhook('evt_fpx_b', 'checkout.session.async_payment_succeeded', $payment, 'paid')->assertJson(['result' => 'paid']);
+
+        $buyer->getJson("/api/orders/{$order->id}")->assertOk()
+            ->assertJsonPath('payments.0.payment_method', 'fpx')
+            ->assertJsonPath('payments.0.gateway_charge_id', 'ch_test_fpx')
+            ->assertJsonPath('payments.0.payment_method_details.bank', 'maybank2u')
+            ->assertJsonPath('payments.0.payment_method_details.transaction_id', '2611271234567890')
+            ->assertJsonPath('payments.0.amount_sen', 45000)
+            ->assertJsonPath('payments.0.status', 'paid');
+
+        // Stored, so later views don't call Stripe again (once() above).
+        $buyer->getJson("/api/orders/{$order->id}")->assertJsonPath('payments.0.payment_method', 'fpx');
     }
 
     public function test_stripe_fee_is_recorded_once_and_comes_out_of_skillmatch_commission(): void

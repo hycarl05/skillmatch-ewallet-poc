@@ -16,6 +16,7 @@ class Payment extends Model
             'amount_sen' => 'integer',
             'gateway_fee_sen' => 'integer',
             'dispute_amount_sen' => 'integer',
+            'payment_method_details' => 'array',
             'paid_at' => 'datetime',
         ];
     }

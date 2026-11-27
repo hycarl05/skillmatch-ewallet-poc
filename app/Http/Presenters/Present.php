@@ -148,7 +148,7 @@ class Present
 
         if ($detail) {
             if ($viewAs === 'platform' || $viewAs === 'buyer') {
-                $data['payments'] = $order->payments()->get(['id', 'gateway', 'gateway_reference', 'amount_sen', 'gateway_fee_sen', 'status', 'paid_at', 'created_at', 'dispute_reference', 'dispute_status', 'dispute_reason', 'dispute_amount_sen'])
+                $data['payments'] = $order->payments()->get(['id', 'gateway', 'gateway_reference', 'amount_sen', 'gateway_fee_sen', 'payment_method', 'gateway_charge_id', 'payment_method_details', 'status', 'paid_at', 'created_at', 'dispute_reference', 'dispute_status', 'dispute_reason', 'dispute_amount_sen'])
                     ->each(fn ($p) => $viewAs === 'platform' ? null : $p->makeHidden(['gateway_fee_sen', 'dispute_reference', 'dispute_reason']));
                 $data['refunds'] = $order->refunds()->with('requester', 'reviewer')->latest('id')->get()->map(fn (Refund $r) => self::refund($r, $viewAs))->values();
             }

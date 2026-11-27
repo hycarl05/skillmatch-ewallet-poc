@@ -62,8 +62,13 @@ class OrderController extends Controller
     {
         $this->authorizeView($request->user(), $order);
 
-        $order->payments()->whereNull('gateway_fee_sen')->whereIn('status', ['paid', 'refunded'])->get()
-            ->each(fn ($payment) => $this->orders->recordProcessingFee($payment));
+        // Fetched lazily: an FPX payment's charge can appear after the webhook.
+        $order->payments()->whereIn('status', ['paid', 'refunded'])
+            ->where(fn ($q) => $q->whereNull('gateway_fee_sen')->orWhereNull('payment_method'))->get()
+            ->each(function ($payment) {
+                $this->orders->recordProcessingFee($payment);
+                $this->orders->recordPaymentMethod($payment);
+            });
 
         return response()->json(Present::order($order, $request->user(), detail: true));
     }
