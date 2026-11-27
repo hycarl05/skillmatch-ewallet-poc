@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import AdminBreakdown, { BuyerPayment, TrainerEarnings } from '../MoneyBreakdown';
-import { GATEWAY_LABEL, api, rm, when } from '../lib';
+import { useApp } from '../context';
+import { GATEWAY_LABEL, api, rm, setUserId, when } from '../lib';
 import { RefundForm, RefundList } from '../Refunds';
 import { Badge, Button, Card, ErrorNote } from '../ui';
 
@@ -32,7 +33,20 @@ export default function OrderDetail() {
     const [busy, setBusy] = useState(false);
     const [refunding, setRefunding] = useState(false);
 
-    const load = useCallback(() => api(`/orders/${id}`).then(setOrder).catch((e) => setError(e.message)), [id]);
+    // Demo only: whose order this is, when the current demo user can't see it.
+    const [owner, setOwner] = useState(null);
+    const { users } = useApp();
+
+    const load = useCallback(
+        () =>
+            api(`/orders/${id}`)
+                .then(setOrder)
+                .catch((e) => {
+                    setError(e.message);
+                    if (e.status === 403 && e.data?.owner_id) setOwner(e.data.owner_id);
+                }),
+        [id],
+    );
 
     useEffect(() => {
         load();
@@ -61,6 +75,22 @@ export default function OrderDetail() {
     };
     const act = (action, body) => post(`/orders/${id}/${action}`, body);
 
+    if (!order && owner) {
+        const ownerName = users.find((u) => String(u.id) === String(owner))?.name ?? 'the buyer';
+        return (
+            <div className="space-y-3">
+                <ErrorNote error={error} />
+                <Button
+                    onClick={() => {
+                        setUserId(owner);
+                        window.location.reload();
+                    }}
+                >
+                    Switch to {ownerName}
+                </Button>
+            </div>
+        );
+    }
     if (!order) return error ? <ErrorNote error={error} /> : <div className="text-slate-500">Loading…</div>;
 
     const gatewayName = GATEWAY_LABEL[order.gateway] ?? order.gateway;

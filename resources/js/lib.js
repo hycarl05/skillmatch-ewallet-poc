@@ -16,7 +16,10 @@ export async function api(path, { method = 'GET', body } = {}) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
         const first = data.errors ? Object.values(data.errors)[0]?.[0] : null;
-        throw new Error(first || data.message || `Request failed (${res.status})`);
+        const error = new Error(first || data.message || `Request failed (${res.status})`);
+        error.status = res.status;
+        error.data = data;
+        throw error;
     }
     return data;
 }

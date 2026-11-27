@@ -60,6 +60,17 @@ class OrderController extends Controller
 
     public function show(Request $request, Order $order): JsonResponse
     {
+        // Demo only: name the buyer so the app can offer to switch "Acting as"
+        // to them. Real auth replaces this (and DemoUser) before production.
+        if (! app()->isProduction() && ! $this->canView($request->user(), $order)) {
+            $order->loadMissing('buyer');
+
+            return response()->json([
+                'message' => "This order belongs to {$order->buyer->name}.",
+                'owner_id' => $order->buyer_id,
+            ], 403);
+        }
+
         $this->authorizeView($request->user(), $order);
 
         $order->payments()->whereNull('gateway_fee_sen')->whereIn('status', ['paid', 'refunded'])->get()
@@ -81,6 +92,11 @@ class OrderController extends Controller
 
     private function authorizeView(User $user, Order $order): void
     {
-        abort_unless($user->role === UserRole::Platform || $order->involves($user), 403);
+        abort_unless($this->canView($user, $order), 403);
+    }
+
+    private function canView(User $user, Order $order): bool
+    {
+        return $user->role === UserRole::Platform || $order->involves($user);
     }
 }
