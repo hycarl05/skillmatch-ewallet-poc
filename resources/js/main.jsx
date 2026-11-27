@@ -21,6 +21,22 @@ function App() {
             .then(([u, c]) => {
                 setUsers(u);
                 setConfig(c);
+
+                // Demo only: the payment return URL carries ?as=<buyer id> so a buyer
+                // coming back from the gateway acts as themselves again, even if
+                // another tab switched the demo user meanwhile. Real auth replaces this.
+                const url = new URL(window.location.href);
+                const as = url.searchParams.get('as');
+                if (as !== null) {
+                    url.searchParams.delete('as');
+                    window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+                    if (u.find((x) => String(x.id) === as)) {
+                        setUserId(as);
+                        setCurrent(as);
+                        return;
+                    }
+                }
+
                 if (!u.find((x) => String(x.id) === String(getUserId())) && u[1]) {
                     setUserId(u[1].id);
                     setCurrent(String(u[1].id));

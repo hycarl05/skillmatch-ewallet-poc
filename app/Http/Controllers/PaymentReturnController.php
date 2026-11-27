@@ -13,6 +13,11 @@ class PaymentReturnController extends Controller
 {
     public function __invoke(Payment $payment)
     {
-        return redirect("/orders/{$payment->order_id}?returned=1");
+        // Demo only: `as` switches "Acting as" back to the buyer, in case the
+        // demo user (shared by all tabs) changed during checkout. Real auth
+        // replaces this; DemoUser already refuses to run in production.
+        $buyerId = $payment->order()->value('buyer_id');
+
+        return redirect("/orders/{$payment->order_id}?returned=1&as={$buyerId}");
     }
 }
