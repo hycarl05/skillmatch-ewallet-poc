@@ -27,7 +27,9 @@ class OrderController extends Controller
             $query->where(fn ($q) => $q
                 ->where('buyer_id', $user->id)
                 ->orWhere('beneficiary_id', $user->id)
-                ->orWhereHas('splits', fn ($s) => $s->where('recipient_id', $user->id)));
+                ->orWhereHas('splits', fn ($s) => $s->where('recipient_id', $user->id))
+                // HRDC bookings have no trainer split, so match the provider through the training.
+                ->orWhere(fn ($h) => $h->where('funding', 'hrdc')->whereHas('training', fn ($t) => $t->where('seller_id', $user->id))));
         }
 
         return response()->json($query->get()->map(fn ($o) => Present::order($o, $user)));
@@ -41,6 +43,8 @@ class OrderController extends Controller
             'skillpoints' => ['nullable', 'integer', 'min:0'],
             'gateway' => ['nullable', 'string'],
             'payout_mode' => ['nullable', Rule::enum(PayoutMode::class)],
+            // hrdc = book an HRDC-claimable training without paying here; HRDC pays the provider
+            'funding' => ['nullable', 'in:platform,hrdc'],
         ]);
 
         $result = $this->orders->create(
@@ -50,6 +54,7 @@ class OrderController extends Controller
             (int) ($data['skillpoints'] ?? 0),
             $data['gateway'] ?? config('skillmatch.default_gateway'),
             isset($data['payout_mode']) ? PayoutMode::from($data['payout_mode']) : null,
+            $data['funding'] ?? 'platform',
         );
 
         return response()->json([

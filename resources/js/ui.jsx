@@ -11,6 +11,14 @@ const STATUS_STYLE = {
     refunded: 'bg-slate-100 text-slate-700 ring-slate-300',
     reversed: 'bg-slate-100 text-slate-700 ring-slate-300',
     clawback_required: 'bg-rose-50 text-rose-800 ring-rose-200',
+    booked: 'bg-sky-50 text-sky-800 ring-sky-200',
+    owed: 'bg-amber-50 text-amber-800 ring-amber-200',
+    // subscriptions
+    active: 'bg-emerald-50 text-emerald-800 ring-emerald-200',
+    past_due: 'bg-amber-50 text-amber-800 ring-amber-200',
+    cancelled: 'bg-slate-100 text-slate-700 ring-slate-300',
+    expired: 'bg-slate-100 text-slate-700 ring-slate-300',
+    void: 'bg-slate-100 text-slate-700 ring-slate-300',
     // refunds
     requested: 'bg-amber-50 text-amber-800 ring-amber-200',
     rejected: 'bg-slate-100 text-slate-700 ring-slate-300',

@@ -113,6 +113,39 @@ The breadcrumb above the chart (*Collected by day › Fri, 20 Nov › Training: 
 
 The data comes from `GET /api/platform/dashboard?days=30` (admin only): one row per order plus the attention counts. The browser does the grouping, which is fine for a PoC. With thousands of orders a month the totals should move to the server.
 
+## Revenue rules (client's Training Revenue Stream v3.1)
+
+The client's workbook is stored as data, so prices and rates change without code.
+
+**Commission** (`commission_rules` table, Revenue Breakdown sheet). The highest-priority matching rule wins, and the rate used is saved on each order:
+
+| Rule | SkillMatch | Trainer | Buyer discount |
+|---|---|---|---|
+| Not HRDC | 20% | 80% | – |
+| HRDC training | 15% | 85% | – |
+| Subscribed company, not HRDC | 18% | 77% | 5% |
+| Subscribed company, not HRDC, from RM100,000 | 15% | 75% | 10% |
+
+No matching rule falls back to `SKILLMATCH_PLATFORM_FEE_PERCENT`. The original flow tests use that fallback (`SKILLMATCH_SEED_CLIENT_RULES=false` in `phpunit.xml`).
+
+**HRDC bookings.** An HRDC-claimable training can be paid normally, or booked "through HRDC" (`funding: hrdc`). HRDC pays the provider directly, so there's no checkout. When the training is confirmed, SkillMatch's commission is booked as owed by the provider (`commission_due:{user}`) and kept back from their next payout.
+
+**Plans** (`plans` table, Tier Plan sheet; prices not final):
+
+| Plan | RM / month | Unlocks |
+|---|---|---|
+| Training Provider T1 / T2 | 500 / 1,000 | Demand Marketplace in their state / every state |
+| Freelance Trainer T1 / T2 | 200 / 500 | Same, plus listing HRDC programmes |
+| Company T1 / T2 / T3 / Premium | 200 / 400 / 1,000 / 5,000 | Career path tools, and the company commission discount |
+
+**How subscriptions are collected, following Stripe's rules:**
+- **Card:** Stripe Checkout in subscription mode (card only). Stripe Billing renews it monthly and sends `invoice.paid` / `invoice.payment_failed` / `customer.subscription.deleted`.
+- **Invoice (FPX):** FPX is single-use and isn't allowed in Stripe's subscription mode. So SkillMatch issues an invoice 7 days before each period ends, paid at a one-off Checkout. If it's unpaid at the period end, the subscription goes past due and the plan stays on for a 7-day grace period, then ends.
+- `php artisan subscriptions:renew` runs hourly (scheduler) to issue invoices and handle past-due and expiry.
+- Stripe dashboard webhook events to enable: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.deleted`, plus the refund and dispute events.
+
+**Try it:** act as *Akademi Digital* → **Demand Marketplace** shows nothing → **Plans** → Training Provider Tier 1 with FakePay → approve → the marketplace now shows Selangor requests. Act as *Nadia (HR)* and subscribe to Company Tier 1 to see the 5% company discount at checkout. Book *Excel for HR Teams* "through HRDC", complete and confirm it, then watch the commission come off Akademi Digital's next payout.
+
 ## Using the real sandboxes
 
 The gateway can be chosen at checkout. FakePay always works; Billplz and CHIP need sandbox keys in `.env`.

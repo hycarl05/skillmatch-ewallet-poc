@@ -144,6 +144,7 @@ class RefundService
     public function refundBlocker(Order $order): ?string
     {
         return match (true) {
+            $order->isHrdcFunded() => 'HRDC paid the provider directly, so there is nothing to refund through SkillMatch.',
             ! in_array($order->status, self::REFUNDABLE, true) => "A {$order->status->value} order can't be refunded.",
             $order->hasOpenDispute() => 'The payment is disputed with the card issuer, which decides the outcome. Respond in the gateway dashboard.',
             $order->refundableSen() <= 0 => 'Everything paid for this order has already been refunded.',

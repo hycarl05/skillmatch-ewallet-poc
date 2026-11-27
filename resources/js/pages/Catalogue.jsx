@@ -34,7 +34,10 @@ export default function Catalogue() {
                     <Card key={t.id}>
                         <div className="flex items-start justify-between gap-4">
                             <div>
-                                <div className="font-medium">{t.title}</div>
+                                <div className="flex items-center gap-2 font-medium">
+                                    {t.title}
+                                    {t.hrdc_claimable && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-800 ring-1 ring-emerald-200">HRDC</span>}
+                                </div>
                                 <div className="text-sm text-slate-500">
                                     by {t.seller.name}
                                     {t.freelancer && <> · delivered by {t.freelancer.name}</>}
@@ -61,6 +64,9 @@ function Checkout({ training, onClose }) {
     const staff = users.filter((u) => u.company_id === me.id);
     const [beneficiary, setBeneficiary] = useState(staff[0]?.id ?? '');
     const [points, setPoints] = useState(0);
+    // HRDC-claimable trainings can be paid here, or booked through HRDC (HRDC pays the provider directly).
+    const [funding, setFunding] = useState('platform');
+    const viaHrdc = funding === 'hrdc';
     const [gateway, setGateway] = useState(config.default_gateway);
     const modes = config.gateways.find((g) => g.name === gateway)?.payout_modes ?? [];
     const [mode, setMode] = useState(modes[0]);
@@ -73,8 +79,8 @@ function Checkout({ training, onClose }) {
     }, [gateway]);
 
     useEffect(() => {
-        api(`/trainings/${training.id}/quote?skillpoints=${points}`).then(setQuote).catch((e) => setError(e.message));
-    }, [points]);
+        api(`/trainings/${training.id}/quote?skillpoints=${viaHrdc ? 0 : points}&funding=${funding}`).then(setQuote).catch((e) => setError(e.message));
+    }, [points, funding]);
 
     const pay = async () => {
         setBusy(true);
@@ -85,12 +91,14 @@ function Checkout({ training, onClose }) {
                 body: {
                     training_id: training.id,
                     beneficiary_id: me.role === 'company_hr' ? Number(beneficiary) : null,
-                    skillpoints: points,
+                    skillpoints: viaHrdc ? 0 : points,
                     gateway,
                     payout_mode: mode,
+                    funding,
                 },
             });
-            window.location.href = res.checkout_url; // off to the gateway's payment page
+            // HRDC bookings have nothing to pay here; everything else goes to the gateway's payment page.
+            window.location.href = res.checkout_url ?? `/orders/${res.order.id}`;
         } catch (e) {
             setError(e.message);
             setBusy(false);
@@ -112,6 +120,19 @@ function Checkout({ training, onClose }) {
                 </label>
             )}
 
+            {training.hrdc_claimable && (
+                <fieldset className="space-y-1 text-sm">
+                    <legend className="text-slate-600">How is this training paid?</legend>
+                    <label className="flex items-center gap-2">
+                        <input type="radio" checked={!viaHrdc} onChange={() => setFunding('platform')} /> Pay now through SkillMatch
+                    </label>
+                    <label className="flex items-center gap-2">
+                        <input type="radio" checked={viaHrdc} onChange={() => setFunding('hrdc')} /> Claim through HRDC (HRDC pays the provider; nothing to pay here)
+                    </label>
+                </fieldset>
+            )}
+
+            {!viaHrdc && (<>
             <label className="block text-sm">
                 <span className="text-slate-600">
                     SkillPoints to use (max {quote?.max_points ?? 0}, {config.sen_per_point} sen each)
@@ -149,14 +170,25 @@ function Checkout({ training, onClose }) {
                 </label>
             </div>
             {mode && <p className="text-xs text-slate-500">{MODE_HELP[mode]}</p>}
+            </>)}
 
             {quote && (
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-1 border-t border-slate-200 pt-3 text-sm tabular-nums">
                     <dt className="text-slate-500">Training price</dt>
                     <dd className="text-right">{rm(quote.gross_sen)}</dd>
-                    <dt className="text-slate-500">SkillPoints discount</dt>
-                    <dd className="text-right">− {rm(quote.discount_sen)}</dd>
-                    <dt className="font-medium">You pay</dt>
+                    {quote.company_discount_sen > 0 && (
+                        <>
+                            <dt className="text-slate-500">Company plan discount</dt>
+                            <dd className="text-right">− {rm(quote.company_discount_sen)}</dd>
+                        </>
+                    )}
+                    {!viaHrdc && (
+                        <>
+                            <dt className="text-slate-500">SkillPoints discount</dt>
+                            <dd className="text-right">− {rm(quote.discount_sen)}</dd>
+                        </>
+                    )}
+                    <dt className="font-medium">{viaHrdc ? 'You pay through SkillMatch' : 'You pay'}</dt>
                     <dd className="text-right font-medium">{rm(quote.amount_sen)}</dd>
                 </dl>
             )}
@@ -164,7 +196,7 @@ function Checkout({ training, onClose }) {
             <ErrorNote error={error} />
             <div className="flex gap-2">
                 <Button onClick={pay} disabled={busy || (me.role === 'company_hr' && !beneficiary)}>
-                    {busy ? 'Opening gateway…' : `Pay ${quote ? rm(quote.amount_sen) : ''}`}
+                    {busy ? (viaHrdc ? 'Booking…' : 'Opening gateway…') : viaHrdc ? 'Book through HRDC' : `Pay ${quote ? rm(quote.amount_sen) : ''}`}
                 </Button>
                 <Button variant="secondary" onClick={onClose}>
                     Cancel

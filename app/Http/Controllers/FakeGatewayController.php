@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Payment;
+use App\Models\SubscriptionInvoice;
 use App\Payments\Gateways\FakeGateway;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\App;
@@ -37,5 +38,26 @@ class FakeGatewayController extends Controller
         }
 
         return redirect()->route('payment.return', ['payment' => $payment->id]);
+    }
+
+    /** Hosted page for a subscription invoice (first period or a renewal). */
+    public function showInvoice(SubscriptionInvoice $invoice)
+    {
+        abort_unless($invoice->gateway === 'fake', 404);
+
+        return view('fake-gateway-subscription', ['invoice' => $invoice->load('subscription.plan', 'subscription.user')]);
+    }
+
+    public function completeInvoice(Request $request, SubscriptionInvoice $invoice, FakeGateway $gateway)
+    {
+        abort_unless($invoice->gateway === 'fake', 404);
+        $outcome = $request->validate(['outcome' => ['required', 'in:paid,failed']])['outcome'];
+
+        App::call(WebhookController::class, [
+            'gateway' => 'fake',
+            'request' => $gateway->invoiceWebhookRequest($invoice, $outcome, 'evt_subinv_'.$invoice->id.'_'.$outcome),
+        ]);
+
+        return redirect('/plans?returned=1');
     }
 }

@@ -3,6 +3,7 @@
 namespace App\Http\Presenters;
 
 use App\Enums\OrderStatus;
+use App\Enums\SplitRole;
 use App\Models\LedgerEntry;
 use App\Models\Order;
 use App\Models\Refund;
@@ -25,6 +26,7 @@ class Present
             'email' => $user->email,
             'role' => $user->role->value,
             'organisation' => $user->organisation,
+            'state' => $user->state,
             'company_id' => $user->company_id,
         ];
     }
@@ -36,6 +38,7 @@ class Present
             'title' => $training->title,
             'description' => $training->description,
             'price_sen' => $training->price_sen,
+            'hrdc_claimable' => $training->hrdc_claimable,
             'seller' => self::user($training->seller),
             'freelancer' => self::user($training->freelancer),
             'freelancer_share_sen' => $training->freelancer_share_sen,
@@ -82,6 +85,8 @@ class Present
             'status' => $order->status->value,
             'payout_mode' => $order->payout_mode->value,
             'gateway' => $order->gateway,
+            // platform = paid through a gateway; hrdc = HRDC pays the provider directly
+            'funding' => $order->funding,
             'training' => ['id' => $order->training->id, 'title' => $order->training->title],
             'buyer' => self::user($order->buyer),
             'beneficiary' => self::user($order->beneficiary),
@@ -95,7 +100,7 @@ class Present
             ],
             'can' => [
                 'pay' => $isBuyer && $order->status === OrderStatus::PendingPayment,
-                'complete' => $isTrainer && $order->status === OrderStatus::Paid,
+                'complete' => $isTrainer && $order->status === ($order->isHrdcFunded() ? OrderStatus::Booked : OrderStatus::Paid),
                 'confirm' => $isBuyer && $order->status === OrderStatus::Completed,
                 'request_refund' => $isBuyer && $requestBlocker === null,
                 'refund' => $isPlatform && app(RefundService::class)->refundBlocker($order) === null,
@@ -110,6 +115,7 @@ class Present
                 'gross_sen' => $order->gross_sen,
                 'skillpoints_used' => $order->skillpoints_used,
                 'discount_sen' => $order->discount_sen,
+                'company_discount_sen' => $order->company_discount_sen,
                 'amount_sen' => $order->amount_sen,
                 'refunded_sen' => $order->refundedSen(),
                 'refundable_sen' => $order->refundableSen(),
@@ -129,6 +135,7 @@ class Present
             $data += [
                 'platform_fee_sen' => $order->platform_fee_sen,
                 'platform_fee_percent' => $order->gross_sen > 0 ? round($order->platform_fee_sen * 100 / $order->gross_sen, 2) : 0,
+                'commission_rule' => $order->commissionRule?->name,
                 // Null until the gateway reports it (FakePay / Billplz / CHIP never do here).
                 'refund_fees_recovered_sen' => $order->refundFeesRecoveredSen(),
                 'processing_fee_sen' => $order->payments()->whereNotNull('gateway_fee_sen')->exists()
@@ -144,6 +151,13 @@ class Present
             $mine = $order->splits->where('recipient_id', $viewer->id);
             $data['my_amount_sen'] = (int) $mine->sum(fn ($s) => $s->remainingSen()); // after refunds
             $data['my_refunded_sen'] = (int) $mine->sum('refunded_sen');
+
+            // HRDC pays the provider directly; SkillMatch's commission is kept
+            // from their next payout once the training is confirmed.
+            if ($order->isHrdcFunded() && $order->isSeller($viewer)) {
+                $data['hrdc_commission_sen'] = $order->platform_fee_sen;
+                $data['hrdc_commission_status'] = $order->splits->firstWhere('role', SplitRole::Platform)?->status->value;
+            }
         }
 
         if ($detail) {
