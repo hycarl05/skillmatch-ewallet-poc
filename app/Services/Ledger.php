@@ -26,6 +26,7 @@ class Ledger
     public const GATEWAY_FEES = 'gateway_fees';
     public const REFUNDS_OWED = 'refunds_owed';
     public const REFUND_FEES_RECOVERED = 'refund_fees_recovered';
+    public const SUBSCRIPTION_REVENUE = 'subscription_revenue';
 
     private const SYSTEM_ACCOUNTS = [
         self::GATEWAY_FEES => ['Payment gateway processing fees (paid by SkillMatch)', 'expense'],
@@ -35,6 +36,7 @@ class Ledger
         self::SKILLPOINTS_DISCOUNT => ['SkillPoints discounts given', 'expense'],
         self::REFUNDS_OWED => ['Refunds owed to buyers, not sent yet', 'liability'],
         self::REFUND_FEES_RECOVERED => ['Processing fees recovered on refunds (from buyer or trainer)', 'revenue'],
+        self::SUBSCRIPTION_REVENUE => ['Subscription fees', 'revenue'],
     ];
 
     public function held(User $user): string
@@ -55,6 +57,12 @@ class Ledger
     public function feeDebt(User $user): string
     {
         return $this->userAccount('fee_debt', $user, 'Refund fees %s owes SkillMatch', 'asset');
+    }
+
+    /** HRDC commission: HRDC paid the provider directly, so the provider owes SkillMatch its share. */
+    public function commissionDue(User $user): string
+    {
+        return $this->userAccount('commission_due', $user, 'HRDC commission %s owes SkillMatch', 'asset');
     }
 
     /**

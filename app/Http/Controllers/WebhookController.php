@@ -9,6 +9,7 @@ use App\Payments\InvalidWebhookSignature;
 use App\Payments\WebhookResult;
 use App\Services\OrderService;
 use App\Services\RefundService;
+use App\Services\SubscriptionService;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -22,7 +23,7 @@ use InvalidArgumentException;
  */
 class WebhookController extends Controller
 {
-    public function __invoke(string $gateway, Request $request, GatewayManager $gateways, OrderService $orders, RefundService $refunds): JsonResponse
+    public function __invoke(string $gateway, Request $request, GatewayManager $gateways, OrderService $orders, RefundService $refunds, SubscriptionService $subscriptions): JsonResponse
     {
         try {
             $result = $gateways->gateway($gateway)->parseWebhook($request);
@@ -39,16 +40,18 @@ class WebhookController extends Controller
         // Recording the event and applying it happen in one DB transaction: if
         // applying fails, the event isn't stored and the gateway's retry works.
         try {
-            $outcome = DB::transaction(function () use ($gateway, $result, $orders, $refunds) {
+            $outcome = DB::transaction(function () use ($gateway, $result, $orders, $refunds, $subscriptions) {
                 $event = WebhookEvent::create([
                     'gateway' => $gateway,
                     'event_key' => $result->eventKey,
                     'payload' => $result->payload,
                 ]);
 
-                $outcome = $result->kind === WebhookResult::KIND_PAYMENT
-                    ? $orders->applyWebhook($gateway, $result)
-                    : $refunds->applyWebhook($gateway, $result);
+                $outcome = match ($result->kind) {
+                    WebhookResult::KIND_PAYMENT => $orders->applyWebhook($gateway, $result),
+                    WebhookResult::KIND_SUBSCRIPTION => $subscriptions->applyWebhook($gateway, $result),
+                    default => $refunds->applyWebhook($gateway, $result),
+                };
                 $event->update(['result' => $outcome]);
 
                 return $outcome;

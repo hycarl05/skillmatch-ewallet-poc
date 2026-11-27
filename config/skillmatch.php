@@ -11,8 +11,27 @@
 
 return [
 
-    // SkillMatch's commission on every training sale, in percent of the training price.
+    // Fallback commission, in percent of the training price, used only when no
+    // row in the commission_rules table matches the order (see CommissionRules).
     'platform_fee_percent' => (float) env('SKILLMATCH_PLATFORM_FEE_PERCENT', 10),
+
+    'commission' => [
+        // Seed the client's commission table (Revenue Breakdown sheet) with the
+        // demo data. The original flow tests turn this off (phpunit.xml) because
+        // their amounts are worked out with the flat fallback rate.
+        'seed_client_rules' => (bool) env('SKILLMATCH_SEED_CLIENT_RULES', true),
+    ],
+
+    'subscriptions' => [
+        // Gateways that can collect subscription fees. Stripe: card subscriptions
+        // (Stripe Billing) or invoices paid by FPX/card. FakePay: invoices; its
+        // "card" renewals are charged automatically by the renewal job.
+        'gateways' => ['fake', 'stripe'],
+        // Renewal invoices go out this many days before the period ends.
+        'renew_notice_days' => (int) env('SUBSCRIPTION_RENEW_NOTICE_DAYS', 7),
+        // A renewal unpaid at the period end keeps the plan on this much longer.
+        'grace_days' => (int) env('SUBSCRIPTION_GRACE_DAYS', 7),
+    ],
 
     'skillpoints' => [
         // How many sen one SkillPoint is worth as a discount. 1 = 100 points per RM1.

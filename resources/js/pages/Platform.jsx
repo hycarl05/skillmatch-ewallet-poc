@@ -110,6 +110,8 @@ export default function Platform() {
                 </div>
             </Card>
 
+            <RevenueRules />
+
             <Card title="Recent webhooks">
                 <table className="w-full text-sm">
                     <tbody className="divide-y divide-slate-100">
@@ -126,5 +128,66 @@ export default function Platform() {
                 <p className="mt-2 text-xs text-slate-500">Duplicate webhooks are rejected before they are stored, so each event appears once.</p>
             </Card>
         </div>
+    );
+}
+
+/** The client's commission table and the plans, as SkillMatch has them configured. */
+function RevenueRules() {
+    const [data, setData] = useState(null);
+
+    useEffect(() => {
+        api('/platform/revenue-rules').then(setData).catch(() => setData(null));
+    }, []);
+
+    if (!data) return null;
+
+    const pctText = (bps) => `${+(bps / 100).toFixed(2)}%`;
+
+    return (
+        <Card title="Revenue rules">
+            <h3 className="mb-2 text-sm font-medium text-slate-700">Commission (highest priority match wins)</h3>
+            <table className="mb-1 w-full text-sm">
+                <thead className="text-left text-xs text-slate-500">
+                    <tr>
+                        <th className="py-1">Rule</th>
+                        <th className="py-1">Buyer</th>
+                        <th className="py-1">HRDC</th>
+                        <th className="py-1">Needs plan</th>
+                        <th className="py-1 text-right">From</th>
+                        <th className="py-1 text-right">SkillMatch</th>
+                        <th className="py-1 text-right">Buyer discount</th>
+                    </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                    {data.commission_rules.map((r) => (
+                        <tr key={r.id} className={r.active ? '' : 'text-slate-400'}>
+                            <td className="py-1.5">{r.name}</td>
+                            <td className="py-1.5">{r.buyer_role ?? 'any'}</td>
+                            <td className="py-1.5">{r.hrdc === null ? 'both' : r.hrdc ? 'yes' : 'no'}</td>
+                            <td className="py-1.5">{r.requires_subscription ? 'yes' : 'no'}</td>
+                            <td className="py-1.5 text-right tabular-nums">{r.min_amount_sen ? rm(r.min_amount_sen) : '—'}</td>
+                            <td className="py-1.5 text-right tabular-nums">{pctText(r.platform_bps)}</td>
+                            <td className="py-1.5 text-right tabular-nums">{r.buyer_discount_bps ? pctText(r.buyer_discount_bps) : '—'}</td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+            <p className="mb-4 text-xs text-slate-500">No matching rule: {data.fallback_percent}%. The rate used is saved on each order, so changing a rule never changes past orders.</p>
+
+            <h3 className="mb-2 text-sm font-medium text-slate-700">Plans</h3>
+            <table className="w-full text-sm">
+                <tbody className="divide-y divide-slate-100">
+                    {data.plans.map((p) => (
+                        <tr key={p.id}>
+                            <td className="py-1.5">{p.name}</td>
+                            <td className="py-1.5 text-slate-500">{p.audience}</td>
+                            <td className="py-1.5 text-right tabular-nums">
+                                {rm(p.price_sen)} / {p.interval}
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </Card>
     );
 }

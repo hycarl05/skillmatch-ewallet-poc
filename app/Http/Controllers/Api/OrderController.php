@@ -41,6 +41,8 @@ class OrderController extends Controller
             'skillpoints' => ['nullable', 'integer', 'min:0'],
             'gateway' => ['nullable', 'string'],
             'payout_mode' => ['nullable', Rule::enum(PayoutMode::class)],
+            // hrdc = book an HRDC-claimable training without paying here; HRDC pays the provider
+            'funding' => ['nullable', 'in:platform,hrdc'],
         ]);
 
         $result = $this->orders->create(
@@ -50,6 +52,7 @@ class OrderController extends Controller
             (int) ($data['skillpoints'] ?? 0),
             $data['gateway'] ?? config('skillmatch.default_gateway'),
             isset($data['payout_mode']) ? PayoutMode::from($data['payout_mode']) : null,
+            $data['funding'] ?? 'platform',
         );
 
         return response()->json([

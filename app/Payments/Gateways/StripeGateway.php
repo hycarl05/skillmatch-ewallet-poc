@@ -4,11 +4,14 @@ namespace App\Payments\Gateways;
 
 use App\Models\Order;
 use App\Models\Payment;
+use App\Models\Subscription;
+use App\Models\SubscriptionInvoice;
 use App\Payments\CheckoutSession;
 use App\Payments\InvalidWebhookSignature;
 use App\Payments\PaymentGateway;
 use App\Payments\RefundResult;
 use App\Payments\ReportsProcessingFee;
+use App\Payments\SubscriptionGateway;
 use App\Payments\WebhookResult;
 use Illuminate\Http\Request;
 use Stripe\Exception\ApiErrorException;
@@ -27,7 +30,7 @@ use UnexpectedValueException;
  *
  * Stripe's session id is the payment's gateway_reference.
  */
-class StripeGateway implements PaymentGateway, ReportsProcessingFee
+class StripeGateway implements PaymentGateway, ReportsProcessingFee, SubscriptionGateway
 {
     public function __construct(private readonly StripeClient $stripe) {}
 
@@ -87,6 +90,10 @@ class StripeGateway implements PaymentGateway, ReportsProcessingFee
         }
 
         $object = $event->data->object;
+
+        if ($subscriptionResult = $this->subscriptionWebhook($event->type, $event->id, $object->toArray(), $event->toArray())) {
+            return $subscriptionResult;
+        }
 
         // refund.created / refund.updated / refund.failed / charge.refund.updated
         if (($object->object ?? null) === 'refund') {
@@ -170,6 +177,157 @@ class StripeGateway implements PaymentGateway, ReportsProcessingFee
             // pending / requires_action (common for FPX): the outcome arrives as a refund.updated webhook.
             default => new RefundResult(RefundResult::PENDING, $refund->id),
         };
+    }
+
+    /**
+     * Card subscription through Checkout in subscription mode. Stripe only
+     * allows cards here: FPX is single-use, so it can't be charged again.
+     * Stripe then charges the card every month and sends invoice.paid.
+     */
+    public function startCardSubscription(Subscription $subscription, string $returnUrl): CheckoutSession
+    {
+        $subscription->loadMissing('plan', 'user');
+
+        $session = $this->stripe->checkout->sessions->create([
+            'mode' => 'subscription',
+            'payment_method_types' => ['card'],
+            'line_items' => [[
+                'quantity' => 1,
+                'price_data' => [
+                    'currency' => 'myr',
+                    'unit_amount' => $subscription->price_sen,
+                    'recurring' => ['interval' => $subscription->plan->interval],
+                    'product_data' => ['name' => "SkillMatch {$subscription->plan->name}"],
+                ],
+            ]],
+            'customer_email' => $subscription->user->email,
+            'client_reference_id' => "subscription-{$subscription->id}",
+            'metadata' => ['skillmatch_subscription_id' => (string) $subscription->id],
+            // Copied onto the Stripe subscription, so every renewal invoice names ours.
+            'subscription_data' => ['metadata' => ['skillmatch_subscription_id' => (string) $subscription->id]],
+            'success_url' => $returnUrl,
+            'cancel_url' => $returnUrl,
+        ], ['idempotency_key' => "subscription-{$subscription->id}-{$subscription->created_at?->timestamp}"]);
+
+        return new CheckoutSession($session->id, $session->url);
+    }
+
+    /** One period's invoice, paid at a one-off Checkout (FPX or card, as enabled in the dashboard). */
+    public function checkoutInvoice(SubscriptionInvoice $invoice, string $returnUrl): CheckoutSession
+    {
+        $invoice->loadMissing('subscription.plan', 'subscription.user');
+        $subscription = $invoice->subscription;
+
+        $session = $this->stripe->checkout->sessions->create([
+            'mode' => 'payment',
+            'line_items' => [[
+                'quantity' => 1,
+                'price_data' => [
+                    'currency' => 'myr',
+                    'unit_amount' => $invoice->amount_sen,
+                    'product_data' => ['name' => "SkillMatch {$subscription->plan->name}, {$invoice->period_start->format('j M Y')} to {$invoice->period_end->format('j M Y')}"],
+                ],
+            ]],
+            'customer_email' => $subscription->user->email,
+            'client_reference_id' => "subscription-invoice-{$invoice->id}",
+            'metadata' => ['skillmatch_subscription_invoice_id' => (string) $invoice->id],
+            'success_url' => $returnUrl,
+            'cancel_url' => $returnUrl,
+        ], ['idempotency_key' => "subscription-invoice-{$invoice->id}-{$invoice->created_at?->timestamp}"]);
+
+        return new CheckoutSession($session->id, $session->url);
+    }
+
+    public function cancelAtPeriodEnd(Subscription $subscription): void
+    {
+        if ($subscription->gateway_subscription_id) {
+            $this->stripe->subscriptions->update($subscription->gateway_subscription_id, ['cancel_at_period_end' => true]);
+        }
+    }
+
+    /** Subscription events, or null when the event is about an order payment, refund or dispute. */
+    private function subscriptionWebhook(string $type, string $eventId, array $object, array $payload): ?WebhookResult
+    {
+        $kind = $object['object'] ?? null;
+
+        // Checkout for a SkillMatch renewal invoice (FPX or card, one-off).
+        if ($kind === 'checkout.session' && isset($object['metadata']['skillmatch_subscription_invoice_id'])) {
+            return new WebhookResult(
+                reference: (string) $object['id'],
+                status: match ($type) {
+                    'checkout.session.completed' => ($object['payment_status'] ?? null) === 'paid' ? WebhookResult::PAID : WebhookResult::PENDING,
+                    'checkout.session.async_payment_succeeded' => WebhookResult::PAID,
+                    'checkout.session.async_payment_failed', 'checkout.session.expired' => WebhookResult::FAILED,
+                    default => WebhookResult::PENDING,
+                },
+                amountSen: isset($object['amount_total']) ? (int) $object['amount_total'] : null,
+                eventKey: $eventId,
+                payload: $payload,
+                kind: WebhookResult::KIND_SUBSCRIPTION,
+                ownReference: (string) $object['metadata']['skillmatch_subscription_invoice_id'],
+                subject: 'invoice',
+            );
+        }
+
+        // Checkout that started a card subscription.
+        if ($kind === 'checkout.session' && ($object['mode'] ?? null) === 'subscription') {
+            $paid = $type === 'checkout.session.completed' && in_array($object['payment_status'] ?? null, ['paid', 'no_payment_required'], true);
+
+            return new WebhookResult(
+                reference: (string) $object['id'],
+                status: $paid ? WebhookResult::PAID : ($type === 'checkout.session.expired' ? WebhookResult::FAILED : WebhookResult::PENDING),
+                amountSen: isset($object['amount_total']) ? (int) $object['amount_total'] : null,
+                eventKey: $eventId,
+                payload: $payload,
+                kind: WebhookResult::KIND_SUBSCRIPTION,
+                gatewayPaymentId: is_string($object['subscription'] ?? null) ? $object['subscription'] : null,
+                ownReference: isset($object['metadata']['skillmatch_subscription_id']) ? (string) $object['metadata']['skillmatch_subscription_id'] : null,
+                subject: 'checkout',
+            );
+        }
+
+        // Stripe charged (or failed to charge) a card subscription for a period.
+        if ($kind === 'invoice' && in_array($type, ['invoice.paid', 'invoice.payment_failed'], true)) {
+            // Newer API versions nest the subscription under parent.subscription_details.
+            $subscriptionId = data_get($object, 'parent.subscription_details.subscription') ?? data_get($object, 'subscription');
+            $ours = data_get($object, 'parent.subscription_details.metadata.skillmatch_subscription_id')
+                ?? data_get($object, 'subscription_details.metadata.skillmatch_subscription_id');
+
+            if (! $subscriptionId && ! $ours) {
+                return null; // not a subscription invoice
+            }
+
+            return new WebhookResult(
+                reference: (string) $object['id'],
+                status: $type === 'invoice.paid' ? WebhookResult::PAID : WebhookResult::FAILED,
+                amountSen: (int) ($object['amount_paid'] ?? 0),
+                eventKey: $eventId,
+                payload: $payload,
+                kind: WebhookResult::KIND_SUBSCRIPTION,
+                gatewayPaymentId: is_string($subscriptionId) ? $subscriptionId : null,
+                ownReference: $ours !== null ? (string) $ours : null,
+                subject: 'renewal',
+                // The line's period is the period paid for (the invoice's own period_* fields are not).
+                periodStart: data_get($object, 'lines.data.0.period.start'),
+                periodEnd: data_get($object, 'lines.data.0.period.end'),
+            );
+        }
+
+        if ($kind === 'subscription' && $type === 'customer.subscription.deleted') {
+            return new WebhookResult(
+                reference: (string) $object['id'],
+                status: WebhookResult::CANCELLED,
+                amountSen: null,
+                eventKey: $eventId,
+                payload: $payload,
+                kind: WebhookResult::KIND_SUBSCRIPTION,
+                gatewayPaymentId: (string) $object['id'],
+                ownReference: isset($object['metadata']['skillmatch_subscription_id']) ? (string) $object['metadata']['skillmatch_subscription_id'] : null,
+                subject: 'subscription',
+            );
+        }
+
+        return null;
     }
 
     /** Stripe's fee lives on the charge's balance transaction. */

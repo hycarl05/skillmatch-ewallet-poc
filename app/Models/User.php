@@ -16,7 +16,7 @@ class User extends Authenticatable
     use HasFactory, Notifiable;
 
     protected $fillable = [
-        'name', 'email', 'password', 'role', 'organisation', 'company_id', 'bank_name', 'bank_account_last4', 'stripe_account_id',
+        'name', 'email', 'password', 'role', 'organisation', 'state', 'company_id', 'bank_name', 'bank_account_last4', 'stripe_account_id',
     ];
 
     protected $hidden = ['password', 'remember_token'];
@@ -39,6 +39,11 @@ class User extends Authenticatable
     public function staff(): HasMany
     {
         return $this->hasMany(User::class, 'company_id');
+    }
+
+    public function subscriptions(): HasMany
+    {
+        return $this->hasMany(Subscription::class);
     }
 
     public function skillpointTransactions(): HasMany

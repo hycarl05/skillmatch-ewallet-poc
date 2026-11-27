@@ -25,6 +25,9 @@ class Order extends Model
             'discount_sen' => 'integer',
             'amount_sen' => 'integer',
             'platform_fee_sen' => 'integer',
+            'company_discount_sen' => 'integer',
+            'commission_bps' => 'integer',
+            'commission_rule_id' => 'integer',
             'paid_at' => 'datetime',
             'completed_at' => 'datetime',
             'confirmed_at' => 'datetime',
@@ -83,6 +86,17 @@ class Order extends Model
     public function refundFeesRecoveredSen(): int
     {
         return (int) $this->refunds()->whereIn('status', Refund::COMMITTED)->whereIn('fee_paid_by', [Refund::FEE_BUYER, Refund::FEE_TRAINER])->sum('fee_sen');
+    }
+
+    /** HRDC pays the provider directly; nothing passes through a gateway. */
+    public function isHrdcFunded(): bool
+    {
+        return $this->funding === 'hrdc';
+    }
+
+    public function commissionRule(): BelongsTo
+    {
+        return $this->belongsTo(CommissionRule::class);
     }
 
     public function hasOpenDispute(): bool

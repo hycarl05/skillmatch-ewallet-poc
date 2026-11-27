@@ -29,6 +29,8 @@ use Throwable;
  *   pending_payment -> paid -> completed -> confirmed
  *                        \-------\------------\-> refunded  (see RefundService)
  *   pending_payment -> failed
+ *   booked -> completed -> confirmed          (HRDC: paid by HRDC outside SkillMatch;
+ *                                              the commission becomes owed by the provider)
  *
  * Money never touches SkillMatch's own account except its commission. Every
  * step writes a balanced ledger transaction describing where the money is.
@@ -38,6 +40,7 @@ class OrderService
     public function __construct(
         private readonly GatewayManager $gateways,
         private readonly Ledger $ledger,
+        private readonly CommissionRules $commissionRules,
     ) {}
 
     /**
@@ -45,12 +48,20 @@ class OrderService
      *
      * @return array<string, int>
      */
-    public function quote(Training $training, User $buyer, int $requestedPoints = 0): array
+    public function quote(Training $training, User $buyer, int $requestedPoints = 0, string $funding = 'platform'): array
     {
         $price = $training->price_sen;
-        $fee = (int) round($price * config('skillmatch.platform_fee_percent') / 100);
+
+        // Commission and company discount come from the client's rule table
+        // (buyer type, HRDC, subscription, amount). The discount is shared by
+        // SkillMatch and the trainer exactly as the rule's percentages say.
+        $rule = $this->commissionRules->for($buyer, $training);
+        $amounts = $this->commissionRules->amounts($rule, $price);
+        $fee = $amounts['platform_fee_sen'];
+        $companyDiscount = $amounts['company_discount_sen'];
+
         $freelancerShare = $training->freelancer_id ? $training->freelancer_share_sen : 0;
-        $sellerShare = $price - $fee - $freelancerShare;
+        $sellerShare = $price - $fee - $companyDiscount - $freelancerShare;
 
         if ($sellerShare < 0) {
             throw ValidationException::withMessages(['training' => 'Freelancer share is larger than what is left after the platform fee.']);
@@ -58,20 +69,29 @@ class OrderService
 
         // The SkillPoints discount comes out of SkillMatch's commission, so it
         // is capped at the fee and the trainer's share is never touched.
+        // Nothing is paid through SkillMatch for an HRDC booking, so no points.
+        $hrdc = $funding === 'hrdc';
         $senPerPoint = max(1, (int) config('skillmatch.skillpoints.sen_per_point'));
-        $maxPoints = min(intdiv($fee, $senPerPoint), max(0, $buyer->skillpointBalance()));
+        $maxPoints = $hrdc ? 0 : min(intdiv($fee, $senPerPoint), max(0, $buyer->skillpointBalance()));
         $points = max(0, min($requestedPoints, $maxPoints));
         $discount = $points * $senPerPoint;
 
         return [
             'gross_sen' => $price,
+            'funding' => $hrdc ? 'hrdc' : 'platform',
+            'hrdc_claimable' => $training->hrdc_claimable,
+            'commission_rule_id' => $rule?->id,
+            'commission_rule_name' => $rule?->name ?? 'Default rate',
+            'commission_bps' => $amounts['platform_bps'],
             'platform_fee_sen' => $fee,
+            'company_discount_sen' => $companyDiscount,
             'seller_share_sen' => $sellerShare,
             'freelancer_share_sen' => $freelancerShare,
             'max_points' => $maxPoints,
             'points' => $points,
             'discount_sen' => $discount,
-            'amount_sen' => $price - $discount,
+            // HRDC bookings: the buyer pays nothing through SkillMatch.
+            'amount_sen' => $hrdc ? 0 : $price - $companyDiscount - $discount,
             'platform_net_sen' => $fee - $discount,
         ];
     }
@@ -84,8 +104,13 @@ class OrderService
         int $points,
         string $gatewayName,
         ?PayoutMode $payoutMode = null,
+        string $funding = 'platform',
     ): array {
         $this->validateBuyer($buyer, $training, $beneficiary);
+
+        if ($funding === 'hrdc') {
+            return ['order' => $this->bookHrdc($buyer, $training, $beneficiary, $points), 'checkout_url' => null];
+        }
 
         if (! in_array($gatewayName, $this->gateways->available(), true)) {
             throw ValidationException::withMessages(['gateway' => "Unknown gateway '{$gatewayName}'."]);
@@ -118,8 +143,11 @@ class OrderService
                 'gross_sen' => $quote['gross_sen'],
                 'skillpoints_used' => $quote['points'],
                 'discount_sen' => $quote['discount_sen'],
+                'company_discount_sen' => $quote['company_discount_sen'],
                 'amount_sen' => $quote['amount_sen'],
                 'platform_fee_sen' => $quote['platform_fee_sen'],
+                'commission_rule_id' => $quote['commission_rule_id'],
+                'commission_bps' => $quote['commission_bps'],
             ]);
 
             $seller = $training->seller;
@@ -165,6 +193,48 @@ class OrderService
         $payment->update(['gateway_reference' => $session->reference, 'checkout_url' => $session->url]);
 
         return ['order' => $order->fresh(), 'checkout_url' => $session->url];
+    }
+
+    /**
+     * An HRDC-claimable training booked "through HRDC": HRDC pays the provider
+     * directly, so no checkout is created. SkillMatch's commission is booked
+     * as owed by the provider once the training is confirmed, and kept back
+     * from their next payout (Est Commission sheet, scenario #2).
+     */
+    private function bookHrdc(User $buyer, Training $training, ?User $beneficiary, int $points): Order
+    {
+        if (! $training->hrdc_claimable) {
+            throw ValidationException::withMessages(['funding' => 'This training is not HRDC-claimable.']);
+        }
+        if ($points > 0) {
+            throw ValidationException::withMessages(['skillpoints' => 'SkillPoints can only be used on trainings paid through SkillMatch.']);
+        }
+
+        $quote = $this->quote($training, $buyer, 0, 'hrdc');
+
+        return DB::transaction(function () use ($buyer, $training, $beneficiary, $quote) {
+            $order = Order::create([
+                'reference' => 'SM-'.Str::upper(Str::random(8)),
+                'buyer_id' => $buyer->id,
+                'beneficiary_id' => $beneficiary?->id,
+                'training_id' => $training->id,
+                'status' => OrderStatus::Booked,
+                'payout_mode' => PayoutMode::Deferred,
+                'gateway' => 'hrdc',
+                'funding' => 'hrdc',
+                'gross_sen' => $quote['gross_sen'],
+                'amount_sen' => 0,
+                'platform_fee_sen' => $quote['platform_fee_sen'],
+                'commission_rule_id' => $quote['commission_rule_id'],
+                'commission_bps' => $quote['commission_bps'],
+            ]);
+
+            // Only SkillMatch's commission is tracked: the trainer's money
+            // comes from HRDC, outside the platform.
+            $this->addSplit($order, null, SplitRole::Platform, $quote['platform_fee_sen']);
+
+            return $order->fresh();
+        });
     }
 
     /** Apply a verified webhook. Safe to call more than once for the same event. */
@@ -302,7 +372,7 @@ class OrderService
     {
         $isTrainer = $order->isSeller($by) || $order->training->freelancer_id === $by->id;
         abort_unless($isTrainer, 403, 'Only the trainer can mark this training as completed.');
-        $this->expectStatus($order, OrderStatus::Paid);
+        $this->expectStatus($order, $order->isHrdcFunded() ? OrderStatus::Booked : OrderStatus::Paid);
 
         $order->update(['status' => OrderStatus::Completed, 'completed_at' => now()]);
 
@@ -322,6 +392,12 @@ class OrderService
 
         DB::transaction(function () use ($order) {
             $order->update(['status' => OrderStatus::Confirmed, 'confirmed_at' => now()]);
+
+            if ($order->isHrdcFunded()) {
+                $this->bookHrdcCommission($order);
+
+                return;
+            }
 
             if ($order->payout_mode === PayoutMode::Deferred) {
                 // Only what's left after any refund is released.
@@ -345,9 +421,27 @@ class OrderService
             }
         });
 
-        $this->payOutReleased($order);
+        if (! $order->isHrdcFunded()) {
+            $this->payOutReleased($order);
+        }
 
         return $order->fresh();
+    }
+
+    /** After an HRDC training is confirmed, the provider owes SkillMatch its commission. */
+    private function bookHrdcCommission(Order $order): void
+    {
+        $split = $order->splits()->where('role', SplitRole::Platform)->first();
+        if (! $split) {
+            return;
+        }
+
+        $provider = $order->training->seller;
+        $this->ledger->post('hrdc_commission', "HRDC commission for {$order->reference}, owed by {$provider->name}", $order, [
+            [$this->ledger->commissionDue($provider), $split->amount_sen, 0],
+            [Ledger::PLATFORM_REVENUE, 0, $split->amount_sen],
+        ]);
+        $split->update(['status' => SplitStatus::Owed]);
     }
 
     /** Send every released split to its recipient. Safe to retry. Paused while the payment is disputed. */
@@ -362,11 +456,14 @@ class OrderService
         $provider = $this->gateways->payoutProvider($order->gateway);
 
         foreach ($order->splits()->where('status', SplitStatus::Released)->whereNotNull('recipient_id')->with('recipient')->get() as $split) {
-            // Refund fees this trainer owes SkillMatch are kept back from the payout.
-            $offset = min(max(0, $this->ledger->balance($this->ledger->feeDebt($split->recipient))), $split->remainingSen());
-            $amount = $split->remainingSen() - $offset;
+            // What this trainer owes SkillMatch is kept back from the payout:
+            // refund fees first, then HRDC commission.
+            $available = $split->remainingSen();
+            $offset = min(max(0, $this->ledger->balance($this->ledger->feeDebt($split->recipient))), $available);
+            $commissionOffset = min(max(0, $this->ledger->balance($this->ledger->commissionDue($split->recipient))), $available - $offset);
+            $amount = $available - $offset - $commissionOffset;
 
-            $result = $amount > 0 ? $provider->payout($split, $amount) : new PayoutResult(true, 'kept-for-refund-fees');
+            $result = $amount > 0 ? $provider->payout($split, $amount) : new PayoutResult(true, 'kept-for-amounts-owed');
 
             if (! $result->success) {
                 Log::warning('Payout failed, will retry', ['split' => $split->id, 'message' => $result->message]);
@@ -374,7 +471,7 @@ class OrderService
                 continue;
             }
 
-            DB::transaction(fn () => $this->recordPayout($split, $result->reference, $offset));
+            DB::transaction(fn () => $this->recordPayout($split, $result->reference, $offset, $commissionOffset));
         }
     }
 
@@ -445,8 +542,12 @@ class OrderService
         $split->update(['status' => SplitStatus::PaidOut, 'paid_out_at' => now()]);
     }
 
-    /** $offset: kept back to settle refund fees the recipient owed; it goes to SkillMatch's bank. */
-    private function recordPayout(OrderSplit $split, ?string $reference, int $offset = 0): void
+    /**
+     * $offset: kept back to settle refund fees the recipient owed.
+     * $commissionOffset: kept back to settle HRDC commission they owed.
+     * Both go to SkillMatch's bank instead of the recipient.
+     */
+    private function recordPayout(OrderSplit $split, ?string $reference, int $offset = 0, int $commissionOffset = 0): void
     {
         $split->loadMissing('order', 'recipient');
 
@@ -454,14 +555,26 @@ class OrderService
         if ($offset > 0) {
             $description .= ', keeping RM '.number_format($offset / 100, 2).' for refund fees they owed';
         }
+        if ($commissionOffset > 0) {
+            $description .= ', keeping RM '.number_format($commissionOffset / 100, 2).' for HRDC commission they owed';
+        }
 
         $this->ledger->post('payout', $description, $split->order, [
             [$this->ledger->payable($split->recipient), $split->remainingSen(), 0],
-            [Ledger::PLATFORM_BANK, $offset, 0],
+            [Ledger::PLATFORM_BANK, $offset + $commissionOffset, 0],
             [Ledger::GATEWAY_CLEARING, 0, $split->remainingSen()],
             [$this->ledger->feeDebt($split->recipient), 0, $offset],
+            [$this->ledger->commissionDue($split->recipient), 0, $commissionOffset],
         ]);
-        $split->update(['status' => SplitStatus::PaidOut, 'payout_reference' => $reference, 'payout_offset_sen' => $offset, 'paid_out_at' => now()]);
+        $split->update(['status' => SplitStatus::PaidOut, 'payout_reference' => $reference, 'payout_offset_sen' => $offset + $commissionOffset, 'paid_out_at' => now()]);
+
+        // HRDC commission fully collected: those orders' commission is settled.
+        if ($commissionOffset > 0 && $this->ledger->balance($this->ledger->commissionDue($split->recipient)) <= 0) {
+            OrderSplit::where('role', SplitRole::Platform)
+                ->where('status', SplitStatus::Owed)
+                ->whereHas('order', fn ($q) => $q->where('funding', 'hrdc')->whereHas('training', fn ($t) => $t->where('seller_id', $split->recipient_id)))
+                ->update(['status' => SplitStatus::PaidOut, 'paid_out_at' => now()]);
+        }
     }
 
     public function restoreSkillpoints(Order $order, string $why): void

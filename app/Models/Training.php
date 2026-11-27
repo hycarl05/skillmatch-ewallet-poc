@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Training extends Model
 {
-    protected $fillable = ['seller_id', 'title', 'description', 'price_sen', 'freelancer_id', 'freelancer_share_sen'];
+    protected $fillable = ['seller_id', 'title', 'description', 'price_sen', 'hrdc_claimable', 'freelancer_id', 'freelancer_share_sen'];
 
     protected function casts(): array
     {
@@ -15,6 +15,7 @@ class Training extends Model
             'seller_id' => 'integer',
             'freelancer_id' => 'integer',
             'price_sen' => 'integer',
+            'hrdc_claimable' => 'boolean',
             'freelancer_share_sen' => 'integer',
         ];
     }

@@ -8,6 +8,8 @@ import Orders from './pages/Orders';
 import OrderDetail from './pages/OrderDetail';
 import Wallet from './pages/Wallet';
 import Platform from './pages/Platform';
+import Plans from './pages/Plans';
+import Requests from './pages/Requests';
 import Dashboard from './pages/Dashboard';
 
 function App() {
@@ -46,6 +48,8 @@ function App() {
         isAdmin && ['/dashboard', 'Dashboard'],
         canBuy(me.role) && ['/', 'Trainings'],
         ['/orders', 'Orders'],
+        me.role !== 'staff' && ['/requests', 'Demand Marketplace'],
+        ['company_hr', 'provider', 'freelancer'].includes(me.role) && ['/plans', 'Plans'],
         ['/wallet', 'Wallet'],
         me.role === 'platform' && ['/ledger', 'Platform ledger'],
     ].filter(Boolean);
@@ -96,6 +100,8 @@ function App() {
                     <Route path="/orders/:id" element={<OrderDetail />} />
                     <Route path="/wallet" element={<Wallet />} />
                     <Route path="/ledger" element={<Platform />} />
+                    <Route path="/plans" element={<Plans />} />
+                    <Route path="/requests" element={<Requests />} />
                 </Routes>
             </main>
         </AppContext.Provider>

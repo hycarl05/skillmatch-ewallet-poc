@@ -17,6 +17,7 @@ function Fact({ label, value, hint }) {
 
 const NEXT_STEP = {
     pending_payment: 'Waiting for the gateway to confirm payment (webhook).',
+    booked: 'Booked through HRDC: HRDC pays the provider directly. Waiting for the trainer to deliver the training.',
     paid: 'Paid. Waiting for the trainer to deliver the training and mark it completed.',
     completed: 'Trainer marked it completed. Waiting for the buyer to confirm (or auto-confirm).',
     confirmed: 'Training confirmed.',
@@ -188,7 +189,19 @@ export default function OrderDetail() {
                         <BuyerPayment order={order} />
                     </Card>
                 )}
-                {order.view_as === 'trainer' && (
+                {order.view_as === 'trainer' && order.funding === 'hrdc' && (
+                    <Card title="HRDC booking" className="lg:col-span-2">
+                        <p className="text-sm text-slate-700">
+                            HRDC pays you directly for this training. SkillMatch's commission of <strong>{rm(order.hrdc_commission_sen ?? 0)}</strong> is
+                            {order.hrdc_commission_status === 'paid_out'
+                                ? ' settled.'
+                                : order.hrdc_commission_status === 'owed'
+                                  ? ' owed now, and will be kept from your next payout.'
+                                  : ' charged after the training is confirmed, kept from your next payout.'}
+                        </p>
+                    </Card>
+                )}
+                {order.view_as === 'trainer' && order.funding !== 'hrdc' && (
                     <Card title="Your earnings" className="lg:col-span-2">
                         <TrainerEarnings order={order} />
                     </Card>

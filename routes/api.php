@@ -5,8 +5,11 @@ use App\Http\Controllers\Api\DemoController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\PlatformController;
 use App\Http\Controllers\Api\RefundController;
+use App\Http\Controllers\Api\RevenueRulesController;
 use App\Http\Controllers\Api\StripeConnectController;
+use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\TrainingController;
+use App\Http\Controllers\Api\TrainingRequestController;
 use App\Http\Controllers\Api\WalletController;
 use App\Http\Controllers\WebhookController;
 use App\Http\Middleware\DemoUser;
@@ -20,7 +23,15 @@ Route::get('config', [DemoController::class, 'config']);
 
 Route::middleware(DemoUser::class)->group(function () {
     Route::get('trainings', [TrainingController::class, 'index']);
+    Route::post('trainings', [TrainingController::class, 'store']);
     Route::get('trainings/{training}/quote', [TrainingController::class, 'quote']);
+
+    Route::get('training-requests', [TrainingRequestController::class, 'index']);
+    Route::post('training-requests', [TrainingRequestController::class, 'store']);
+
+    Route::get('subscriptions', [SubscriptionController::class, 'index']);
+    Route::post('subscriptions', [SubscriptionController::class, 'store']);
+    Route::post('subscriptions/{subscription}/cancel', [SubscriptionController::class, 'cancel']);
 
     Route::get('orders', [OrderController::class, 'index']);
     Route::post('orders', [OrderController::class, 'store']);
@@ -40,4 +51,5 @@ Route::middleware(DemoUser::class)->group(function () {
     Route::post('stripe/connect', [StripeConnectController::class, 'onboard']);
     Route::get('platform/ledger', [PlatformController::class, 'ledger']);
     Route::get('platform/dashboard', [DashboardController::class, 'show']);
+    Route::get('platform/revenue-rules', [RevenueRulesController::class, 'index']);
 });
